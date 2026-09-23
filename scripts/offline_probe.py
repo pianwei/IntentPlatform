@@ -19,6 +19,20 @@ def request(path, token=None, body=None, method=None):
         return json.loads(data) if "application/json" in response.headers.get("Content-Type", "") else data.decode()
 
 
+def upload_synthetic_document(token, key):
+    boundary = "intent-offline-" + uuid.uuid4().hex
+    content = b"# Offline synthetic intake\nLocal worker recovery probe.\n"
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"offline.md\"\r\n"
+            "Content-Type: text/markdown\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
+    req = Request("http://web:5173/api/v2/management/workspaces/ws-dev/ingest-jobs/documents",
+                  data=body, headers={"Authorization": "Bearer " + token,
+                                      "Content-Type": f"multipart/form-data; boundary={boundary}",
+                                      "Idempotency-Key": key})
+    with urlopen(req, timeout=10) as response:
+        assert response.status == 202
+        return json.loads(response.read())
+
+
 def main():
     # No token, ticket, arguments or business response is written to the report.
     try:
@@ -68,10 +82,22 @@ def main():
     assert events == request(f"/api/v2/runtime/conversations/{conv['id']}/events?after=0", token)
     assert len(request(f"/api/v2/runtime/runs/{accepted['run_id']}", token)["calls"]) == 1
     request("/api/v2/runtime/sessions/logout", token, {})
+    intake = upload_synthetic_document(manager, str(uuid.uuid4()))
+    intake_path = f"/api/v2/management/workspaces/ws-dev/ingest-jobs/{intake['job_id']}"
+    deadline = time.monotonic() + 30
+    while True:
+        job = request(intake_path, manager)
+        if job["status"] == "SUCCEEDED":
+            break
+        assert job["status"] not in {"FAILED"} and time.monotonic() < deadline, "Synthetic intake worker did not finish"
+        time.sleep(0.2)
+    version = request(f"/api/v2/management/workspaces/ws-dev/documents/{job['result']['document_id']}/versions/1", manager)
+    assert version["revision"] == 1 and version["text"].startswith("# Offline synthetic intake")
     return {"status": "passed", "environment": "isolated-local-development", "external_tcp_reachable": False,
             "identity": "development", "model": "fixture", "business": "synthetic", "static_assets_checked": len(assets),
             "entry_paths": ["console", "chat", "embed"], "run_id": accepted["run_id"], "call_count": 1,
             "events_count": len(events), "duplicate_message_reused_run": True, "event_recovery_equal": True,
+            "ingest_worker_completed": True,
             "runtime_management_denied": True, "acceptance_evidence": False}
 
 

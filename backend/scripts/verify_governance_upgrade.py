@@ -23,7 +23,7 @@ from intent_platform.policies import dependency_error
 
 
 def main():
-    cfg = settings(); target = "intent_governance_upgrade_test"
+    cfg = settings(); target = os.environ.get("INTENT_UPGRADE_TEST_DATABASE", "intent_governance_upgrade_test")
     owner_url = make_url(cfg.migration_database_url).set(database=target); app_url = make_url(cfg.database_url).set(database=target)
     if (owner_url.host, owner_url.port, owner_url.database) != (app_url.host, app_url.port, app_url.database) or not target.endswith("_test"):
         raise RuntimeError("Both URLs must identify the same dedicated upgrade test database")

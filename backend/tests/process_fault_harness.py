@@ -259,6 +259,11 @@ class FaultCase:
         self.alias = "process-fault-" + self.identifier
         definition = {"name": self.alias, "description": "Synthetic local process-fault write; not a bank API", "aliases": [self.alias],
                       "effect": "WRITE", "requires_confirmation": True,
+                      "output_schema": {"type": "object", "properties": {
+                          "synthetic": {"type": "boolean"},
+                          "fixture_case": {"type": "string", "maxLength": 80}},
+                          "required": ["synthetic", "fixture_case"], "additionalProperties": False},
+                      "presentation": {"field_map": {"Synthetic": "synthetic", "Fixture case": "fixture_case"}},
                       "connector": {"kind": "http", "version": "1", "method": "POST", "endpoint": self.origin + "/fixture/" + self.identifier,
                                     "timeout_seconds": 1, "status_path": "status", "result_path": "data", "operation_id_path": "operation_id"}}
         function = self.request("POST", mg + "/functions/import", expected=201, json={"definition": definition})
