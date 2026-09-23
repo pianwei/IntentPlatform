@@ -37,6 +37,7 @@ export type FunctionDefinition = {
   result_type: string;
   aliases: string[];
   input_schema: Record<string, unknown>;
+  output_schema?: Record<string, unknown> | null;
   connector: {
     version?: string;
     http_mapping?: { path: Record<string, string>; query: Record<string, string>; headers: Record<string, string>; body: Record<string, string> } | null;
@@ -58,6 +59,7 @@ export type FunctionDefinition = {
     component: string;
     title: string;
     field_map: Record<string, string>;
+    files_field?: string | null;
   };
   positive_examples: Record<string, unknown>[];
   negative_examples: Record<string, unknown>[];

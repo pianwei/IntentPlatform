@@ -5904,6 +5904,18 @@
             "type": "object",
             "title": "Input Schema"
           },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema"
+          },
           "connector": {
             "$ref": "#/components/schemas/Connector"
           },
@@ -7417,6 +7429,17 @@
             },
             "type": "object",
             "title": "Field Map"
+          },
+          "files_field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files Field"
           }
         },
         "additionalProperties": false,

@@ -11,6 +11,7 @@ import type { SourceReview } from "../../shared/sources";
 import { httpEditorError } from "../../shared/httpMapping";
 import { jsonEqual } from "../../shared/jsonEquality";
 import { CredentialSelector } from "./CredentialSelector";
+import { OutputMappingEditor } from "./OutputMappingEditor";
 export const blankDefinition: FunctionDefinition = {
   name: "",
   description: "",
@@ -24,6 +25,7 @@ export const blankDefinition: FunctionDefinition = {
     required: [],
     additionalProperties: false,
   },
+  output_schema: null,
   connector: {
     kind: "http",
     endpoint: null,
@@ -37,7 +39,7 @@ export const blankDefinition: FunctionDefinition = {
   requires_confirmation: false,
   allowed_users: [],
   preconditions: [],
-  presentation: { component: "detail", title: "查询结果", field_map: {} },
+  presentation: { component: "detail", title: "查询结果", field_map: {}, files_field: null },
   positive_examples: [],
   negative_examples: [],
 };
@@ -45,6 +47,8 @@ export function parseFunctionDraft(raw: string): FunctionDefinition {
   const value = JSON.parse(raw);
   const object = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v);
   if (!object(value) || !object(value.connector) || !object(value.input_schema) || !object(value.presentation)) throw new Error("定义、connector、input_schema 和 presentation 必须是对象");
+  if (value.output_schema !== undefined && value.output_schema !== null && !object(value.output_schema)) throw new Error("output_schema 必须是对象或 null");
+  if (!object(value.presentation.field_map)) throw new Error("presentation.field_map 必须是字段映射对象");
   for (const key of ["name", "description", "object_type", "action", "result_type", "effect"]) if (typeof value[key] !== "string") throw new Error(`${key} 必须是字符串`);
   if (typeof value.connector.kind !== "string" || typeof value.connector.method !== "string") throw new Error("connector.kind 与 method 必须是字符串");
   const httpError = httpEditorError(value.connector);
@@ -279,6 +283,7 @@ export function FunctionEditor({
                 </label>
               </div>
               {!draftError && <HttpMappingEditor definition={definition} update={update} />}
+              {!draftError && <OutputMappingEditor definition={definition} update={update} />}
               {!draftError && <SemanticMappingEditor api={api} workspace={workspace} definition={definition} update={update} />}
               </fieldset>
               {draftError && <Notice kind="error">高级映射无效：{draftError}。请修复 JSON 后再编辑表单、保存或验证；输入已保留。</Notice>}

@@ -4,8 +4,8 @@ from fastapi import HTTPException
 from .document_versions import get_version
 from .ports import at
 
-REVIEW_FIELDS = {"name", "description", "object_type", "action", "result_type", "effect", "requires_confirmation", "input_schema", "participant_roles", "relations", "preconditions", "trusted_preconditions", "parameter_semantics", "argument_bindings", "result_bindings", "success_condition", "presentation", "connector.endpoint", "connector.method", "connector.http_mapping", "connector.status_path", "connector.result_path", "connector.credential_ref"}
-BUSINESS_FIELDS = {"object_type", "action", "result_type", "effect", "requires_confirmation", "success_condition", "connector.status_path", "connector.result_path", "connector.credential_ref"}
+REVIEW_FIELDS = {"name", "description", "object_type", "action", "result_type", "effect", "requires_confirmation", "input_schema", "output_schema", "participant_roles", "relations", "preconditions", "trusted_preconditions", "parameter_semantics", "argument_bindings", "result_bindings", "success_condition", "presentation", "connector.endpoint", "connector.method", "connector.http_mapping", "connector.status_path", "connector.result_path", "connector.credential_ref"}
+BUSINESS_FIELDS = {"object_type", "action", "result_type", "effect", "requires_confirmation", "success_condition", "output_schema", "presentation", "connector.status_path", "connector.result_path", "connector.credential_ref"}
 REVIEW_FIELDS.update({"connector.http_body_required", "connector.http_failure_statuses"})
 BUSINESS_FIELDS.add("connector.http_failure_statuses")
 

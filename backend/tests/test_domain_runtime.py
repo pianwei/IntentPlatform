@@ -91,6 +91,12 @@ def semantic_app(client, admin, resolver_service):
     listing.update({"name": "listing-" + uuid.uuid4().hex[:8], "aliases": [], "participant_roles": [], "argument_bindings": {}, "trusted_preconditions": None,
                     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
                     "connector": {"kind": "http", "endpoint": origin + "/test/list", "status_path": "status", "result_path": "data", "operation_id_path": "operation_id"},
+                    "output_schema": {"type": "object", "properties": {"items": {"type": "array", "maxItems": 100,
+                                      "items": {"type": "object", "properties": {"id": {"type": "string", "maxLength": 256},
+                                                                              "label": {"type": "string", "maxLength": 200}},
+                                                "required": ["id", "label"], "additionalProperties": False}}},
+                                      "required": ["items"], "additionalProperties": False},
+                    "presentation": {"field_map": {"Items": "items"}},
                     "result_bindings": [{"name": "items", "entity_type": "test:Item", "collection_path": "items", "id_field": "id", "label_field": "label", "resolver_ref": "local-items@1"}]})
     listing_id = publish_function(client, admin, listing, {})
     response = client.post(WS + "/agents", headers=admin, json={"name": "Domain test app", "capability_ids": [fid, listing_id]})

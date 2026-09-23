@@ -103,4 +103,10 @@ describe("structured business interaction", () => {
     expect(container.querySelector("script")).toBeNull();
     expect(screen.getByText(/cap-1/)).toBeVisible();
   });
+  it("shows confirmed write success without rendering an invalid returned value or download", () => {
+    render(<ResultCard event={{ ...question, event_type: "RESULT", payload: { status: "SUCCEEDED", component: "file", title: "办理结果", result_unavailable: true, data: {}, fields: [], files: [{ id: "unexpected", filename: "raw.pdf", media_type: "application/pdf", size: 1 }] } }} run={null} onAction={vi.fn()} />);
+    expect(screen.getByText(/业务操作已确认成功，但返回内容未通过/)).toBeVisible();
+    expect(screen.queryByText("raw.pdf")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下载" })).not.toBeInTheDocument();
+  });
 });

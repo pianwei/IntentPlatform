@@ -63,6 +63,9 @@
 | 三故障窗口实际进程验证 | backend目录`./.venv/Scripts/python.exe scripts/verify_process_faults.py --run` | 只允许专库`intent_process_faults_test`；真实子进程终止/自然租约到期/HTTP断连，测试屏障定位故障，保留既有记录；普通pytest跳过，必须单独执行；报告在output/process-faults，不代表前端DOM或真实业务验收 |
 | 本地离线冷启动 | 根目录`./scripts/verify-offline-local.ps1`，依赖已缓存`intent-backend:local`、`intent-web:local`及PostgreSQL镜像 | 新独立internal网络/数据库，无宿主端口，禁止拉取构建；HTTP验证三入口/本地资源/运行token边界及合成Worker单次执行，报告在output/offline；停止并保留验证数据，不能替代正式内网验收 |
 | 必需 CI 检查 | 尚未建立 | 已存在且能运行的 CI 配置与代码托管检查记录 |
+| E0 连接器流式与协议边界 | backend 目录在独立测试环境运行 `./.venv/Scripts/python.exe -m pytest tests/test_connector_transport.py -q`；完整套件由 `./scripts/verify-local.ps1 backend` 执行 | 本地回环合成服务；覆盖分块、压缩与解压超限、重定向、Dify/HiAgent 明确/未知状态、状态查询和写超时单次发送；真实实例协议仍需 R2 单独验证 |
+| 正式配置静态与角色预检 | backend 目录 `./.venv/Scripts/python.exe -m pytest tests/test_production_config.py -q`；正式入口见 `infra/production.compose.yaml` 与 `infra/PRODUCTION_DEPLOYMENT.md` | 合成设置验证缺配拒绝；目标环境 `python -m intent_platform.production_preflight` 还须连真实受限数据库执行只读角色检查，模板不构成正式部署验收 |
+| E1 有限业务输出与旧版本兼容 | backend 目录 `./.venv/Scripts/python.exe -m pytest tests/test_output_contract.py tests/test_http_socket_and_recovery.py -q`；完整套件由 `./scripts/verify-local.ps1 backend` 覆盖；前端由 `./scripts/verify-local.ps1 frontend` 覆盖 | 合成回环与受限 PostgreSQL 检查 Schema/字段/文件投影、读写错误、旧发布及探测不泄露；`backend/OUTPUT_CONTRACT.md` 是行为边界，不替代真实业务字段确认 |
 
 新增登记必须包括：名称、覆盖范围、实际命令或人工步骤的来源位置、执行目录、必要运行时/环境/数据、预期成功条件及报告位置。机器命令必须已从仓库查证；命令已登记不代表每个任务已执行。涉密环境仅保存安全引用，不登记密钥值。手工步骤可作为真实入口，但需足以由另一执行者重现。
 

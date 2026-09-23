@@ -278,7 +278,9 @@ export function ResultCard({
           {statuses[String(data.status)] || String(data.status ?? "已返回")}
         </Badge>
       </header>
-      {component === "table" && tableRows ? (
+      {data.result_unavailable === true ? (
+        <p className="result-text" role="status">业务操作已确认成功，但返回内容未通过已发布的展示契约。请按调用记录核对结果；此处不会重新提交业务。</p>
+      ) : component === "table" && tableRows ? (
         <div className="table-scroll">
           <table>
             <thead>
@@ -305,7 +307,7 @@ export function ResultCard({
       ) : component === "file" ? null : component === "markdown" ? (
         <SafeMarkdown text={valueText(result)} />
       ) : component === "citation" ? (
-        <div className="citation-result"><SafeMarkdown text={typeof result === "string" ? result : valueText(result)} /><p className="muted small">引用内容按服务端原始返回展示；文件引用通过授权下载读取。</p></div>
+        <div className="citation-result"><SafeMarkdown text={typeof result === "string" ? result : valueText(result)} /><p className="muted small">仅展示服务端准许的引用内容；文件通过授权下载读取。</p></div>
       ) : component === "text" ? (
         <p className="result-text">{valueText(result)}</p>
       ) : (
@@ -318,7 +320,7 @@ export function ResultCard({
           ))}
         </dl>
       )}
-      {(component === "file" || (Array.isArray(data.files) && data.files.length > 0)) && (
+      {data.result_unavailable !== true && (component === "file" || (Array.isArray(data.files) && data.files.length > 0)) && (
         <div className="runtime-files">
           {formError && <Notice kind="error">{formError}</Notice>}
           {(Array.isArray(data.files) ? data.files as RuntimeFile[] : []).map(file => <div className="runtime-file" key={file.id}><FileText size={20} /><span><strong>{file.filename}</strong><small>{file.media_type} · {Math.ceil(file.size / 1024)} KB</small></span><button className="secondary" disabled={!onDownload || downloading !== null} onClick={() => {

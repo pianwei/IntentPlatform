@@ -18,6 +18,7 @@ from .semantic_v2 import semantic_errors, normalize_parameters, truth
 from .resolvers import ResolverUnavailable, resolver_budget
 from .policies import permitted, dependency_error, effective_channels
 from .capacity import lock_workspace, claim_attempt
+from .output_contract import project_output, OutputContractError
 
 log = logging.getLogger(__name__)
 
@@ -377,20 +378,50 @@ def finish_call(work, result):
             return
         call.status = result["status"]; call.operation_id = result.get("operation_id") or call.operation_id
         call.lease_until = now() + timedelta(seconds=30) if call.status == "UNKNOWN" else None
-        d = call.definition; data = result.get("data", {})
-        from .result_files import materialize_files
-        data, files, file_error = materialize_files(db, run, call, data)
-        call.result = {**result, "data": data, "files": files}
+        d = call.definition; protected = isinstance(d.get("output_schema"), dict)
+        data, files, file_error, unavailable = {}, [], None, False
+        if call.status == "SUCCEEDED":
+            if protected:
+                try:
+                    data, inline_files = project_output(d, result.get("data"))
+                    if inline_files is not None:
+                        from .result_files import materialize_files
+                        _, files, file_error = materialize_files(db, run, call, {"files": inline_files})
+                        if file_error:
+                            raise OutputContractError("Approved result artifacts are invalid")
+                except (OutputContractError, ValueError):
+                    # The business operation has already succeeded. Never retry a
+                    # confirmed write merely because its display payload is bad.
+                    data, files, unavailable = {}, [], True
+                    if d["effect"] == "READ_ONLY":
+                        call.status = "FAILED"
+                        code, message = "OUTPUT_CONTRACT_ERROR", "Business result could not be displayed under its approved contract"
+                    else:
+                        code, message = "RESULT_UNAVAILABLE", "Business operation succeeded, but its result could not be displayed"
+                    emit(db, run, "ERROR", {"code": code, "message": message, "trace_id": call.id})
+            else:
+                from .result_files import materialize_files
+                data, files, file_error = materialize_files(db, run, call, result.get("data", {}))
+        elif call.status == "FAILED":
+            # Failure bodies can include upstream secrets and are never display data.
+            emit(db, run, "ERROR", {"code": "BUSINESS_FAILED", "message": "Business operation failed; inspect the call trace", "trace_id": call.id})
+        call.result = {"status": call.status, "data": data, "files": files, "operation_id": call.operation_id,
+                       "fixture_mode": bool(result.get("fixture_mode", False)), "result_unavailable": unavailable}
+        if unavailable:
+            call.result["error_code"] = "OUTPUT_CONTRACT_ERROR" if call.status == "FAILED" else "RESULT_UNAVAILABLE"
         # Results keep the original run/revision and never mutate a newer request's object.
-        payload = {"call_id": call.id, "status": call.status, "component": d["presentation"]["component"], "title": d["presentation"]["title"],
-                   "data": data, "provenance": {"capability_id": call.capability_id, "version": call.version}, "fixture_mode": result.get("fixture_mode", False)}
-        if files:
-            payload["files"] = files
-        if file_error:
-            emit(db, run, "ERROR", {"code": "FILE_REJECTED", "message": file_error, "trace_id": call.id})
-        if isinstance(data, dict):
-            payload["fields"] = [{"label": label, "value": data.get(field)} for label, field in d["presentation"].get("field_map", {}).items()] or [{"label": k, "value": v} for k, v in data.items()]
-        emit(db, run, "RESULT", payload)
+        if not (unavailable and call.status == "FAILED"):
+            payload = {"call_id": call.id, "status": call.status, "component": d["presentation"]["component"], "title": d["presentation"]["title"],
+                       "data": data, "provenance": {"capability_id": call.capability_id, "version": call.version}, "fixture_mode": result.get("fixture_mode", False)}
+            if files:
+                payload["files"] = files
+            if unavailable:
+                payload["result_unavailable"] = True
+            if file_error:
+                emit(db, run, "ERROR", {"code": "FILE_REJECTED", "message": file_error, "trace_id": call.id})
+            if isinstance(data, dict):
+                payload["fields"] = [{"label": label, "value": data.get(field)} for label, field in d["presentation"].get("field_map", {}).items()] or [{"label": k, "value": v} for k, v in data.items()]
+            emit(db, run, "RESULT", payload)
         db.flush()
         aggregate_status(db, run)
         status_event(db, run)

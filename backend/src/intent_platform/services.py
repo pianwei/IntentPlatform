@@ -9,6 +9,7 @@ from .schemas import Definition, RuntimeUI
 from .policies import permitted, dependency_error, effective_channels
 from .ontology import compile_definition, input_errors
 from .ports import connector_checks, execute_connector
+from .output_contract import check_output_contract, project_output, OutputContractError
 
 
 def function_view(f):
@@ -90,6 +91,10 @@ def validate_function(db, f, token, body):
         checks = {"schema": True, "python_rdf_consistent": True, "conformance_cases": compiled["conformance_cases"]}
         connector_checks(f.definition, f.workspace_id)
         checks["connector_configuration"] = True
+        protected_output = f.definition["connector"]["kind"] != "fixture"
+        if protected_output:
+            check_output_contract(f.definition)
+            checks["output_contract"] = True
         for sample in f.definition.get("positive_examples", []):
             if compiled["compiler_version"] == "finite-json-v2" and "proposal" in sample:
                 from .semantic_v2 import semantic_pair
@@ -111,7 +116,20 @@ def validate_function(db, f, token, body):
             argument_errors = input_errors(f.definition["input_schema"], body.arguments)
             if argument_errors:
                 raise ValueError("; ".join(argument_errors))
-            probe = execute_connector(f.definition, body.arguments, uid("probe"), token.user_id, f.workspace_id)
+            raw_probe = execute_connector(f.definition, body.arguments, uid("probe"), token.user_id, f.workspace_id)
+            probe = raw_probe if not protected_output else {"status": raw_probe["status"], "operation_id": raw_probe.get("operation_id"),
+                                                               "fixture_mode": False, "data": {}}
+            if protected_output and raw_probe["status"] == "SUCCEEDED":
+                try:
+                    projected, inline_files = project_output(f.definition, raw_probe.get("data"))
+                    probe["data"] = projected
+                    if inline_files is not None:
+                        from .result_files import inspect_inline_files
+                        probe["files"] = inspect_inline_files(inline_files)
+                except (OutputContractError, ValueError):
+                    errors.append("Successful probe result does not match the approved output contract")
+                    probe["data"] = {}
+                    probe["result_unavailable"] = True
             if probe["status"] != "SUCCEEDED":
                 errors.append("Probe did not establish successful business completion")
             if body.failure_arguments is not None and probe["status"] == "SUCCEEDED":
@@ -148,6 +166,11 @@ def publish_function(db, f, token):
     if manifest["documents"] or f.source_state:
         compiled["source_manifest"] = manifest
     connector_checks(f.definition, f.workspace_id)
+    if f.definition["connector"]["kind"] != "fixture":
+        try:
+            check_output_contract(f.definition)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
     f.latest_version += 1
     db.add(FunctionVersion(workspace_id=f.workspace_id, function_id=f.id, version=f.latest_version,
                            definition=compiled.get("semantic_definition", f.definition), compiled=compiled))

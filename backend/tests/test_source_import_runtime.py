@@ -72,6 +72,11 @@ def mapped_function(client, admin, origin):
     document, imported, function = create_import(client, admin, origin)
     d = copy.deepcopy(function["definition"])
     d["connector"].update({"status_path": "status", "result_path": "data", "operation_id_path": "operation_id"})
+    # This source has no response schema. A maintainer supplies the finite
+    # approved projection before validating this newly published version.
+    d["output_schema"] = {"type": "object", "properties": {"path": {"type": "string", "maxLength": 256}},
+                          "required": ["path"], "additionalProperties": False}
+    d["presentation"]["field_map"] = {"Path": "path"}
     response = client.patch(WS + f"/functions/{function['id']}/draft", headers=admin, json={"revision": function["revision"], "definition": d})
     assert response.status_code == 200, response.text
     return document, imported, response.json()

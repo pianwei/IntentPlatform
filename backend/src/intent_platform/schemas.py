@@ -45,6 +45,7 @@ class Presentation(StrictModel):
     component: Literal["detail", "table", "text", "markdown", "citation", "file"] = "detail"
     title: str = "结果"
     field_map: dict[str, str] = Field(default_factory=dict)
+    files_field: str | None = None
 
 
 class Definition(StrictModel):
@@ -55,6 +56,7 @@ class Definition(StrictModel):
     result_type: str = "local:Detail"
     aliases: list[str] = Field(default_factory=list)
     input_schema: dict = Field(default_factory=lambda: {"type": "object", "properties": {}, "additionalProperties": False})
+    output_schema: dict | None = None
     connector: Connector = Field(default_factory=Connector)
     effect: Literal["READ_ONLY", "WRITE"] = "READ_ONLY"
     requires_confirmation: bool = False

@@ -578,7 +578,7 @@ def test_postgres_runner_unknown_socket_write_is_never_replayed(client, admin, h
     from conftest import drain
     origin, state = http_fixture
     alias = "evaluation-timeout-" + uuid.uuid4().hex[:8]
-    definition = Definition(name=alias, description="Synthetic local timeout fixture", aliases=[alias], effect="WRITE", input_schema={"type": "object", "properties": {"delay": {"type": "number"}}, "required": ["delay"], "additionalProperties": False}, connector={"kind": "http", "method": "POST", "endpoint": origin + "/fixture/write", "timeout_seconds": 0.05, "status_path": "status", "result_path": "data"}).model_dump()
+    definition = Definition(name=alias, description="Synthetic local timeout fixture", aliases=[alias], effect="WRITE", input_schema={"type": "object", "properties": {"delay": {"type": "number"}}, "required": ["delay"], "additionalProperties": False}, connector={"kind": "http", "method": "POST", "endpoint": origin + "/fixture/write", "timeout_seconds": 0.05, "status_path": "status", "result_path": "data"}, output_schema={"type": "object", "properties": {"synthetic": {"type": "boolean"}}, "required": ["synthetic"], "additionalProperties": False}, presentation={"field_map": {"Synthetic": "synthetic"}}).model_dump()
     app = fixture_application(client, admin, definition, http_probe={"delay": 0})
     before = state["writes"]
     scenario = multi_confirmation(True)

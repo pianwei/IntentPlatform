@@ -8,8 +8,9 @@ from yaml.tokens import AliasToken, AnchorToken, TagToken
 from .schemas import Definition
 from .ontology import check_schema
 from .http_v2 import safe_header, validate_mapping
+from .output_contract import check_output_contract
 
-PARSER_VERSION = "openapi-3.0-finite-v1"
+PARSER_VERSION = "openapi-3.0-finite-v2"
 MAX_EXPANDED_BYTES = 2_000_000
 MAX_REPORT_BYTES = 4_000_000
 
@@ -117,6 +118,45 @@ def finite_schema(schema):
     return result
 
 
+def response_output_schema(operation):
+    """Infer only a bounded JSON success object; other responses need review."""
+    responses = operation["responses"]
+    successes = [(code, response) for code, response in responses.items()
+                 if isinstance(code, str) and re.fullmatch(r"2\d\d", code)]
+    if len(successes) != 1 or not isinstance(successes[0][1], dict):
+        raise ValueError("Exactly one explicit 2xx JSON response is needed for output inference")
+    code, response = successes[0]
+    content = response.get("content")
+    if not isinstance(content, dict) or set(content) != {"application/json"}:
+        raise ValueError("Output inference needs one application/json success response")
+    media = content["application/json"]
+    if not isinstance(media, dict) or not isinstance(media.get("schema"), dict):
+        raise ValueError("JSON success response has no explicit schema")
+
+    def finite(node):
+        if not isinstance(node, dict) or set(node) - {"type", "properties", "required", "additionalProperties", "items", "maxItems", "minItems", "maxLength", "minLength", "minimum", "maximum", "enum", "title", "description"}:
+            raise ValueError("Response schema uses unsupported output keywords")
+        result = dict(node)
+        if result.get("type") == "object":
+            result["additionalProperties"] = result.get("additionalProperties", False)
+            result["properties"] = {key: finite(value) for key, value in result.get("properties", {}).items()}
+            result.setdefault("required", [])
+        elif result.get("type") == "array":
+            result.setdefault("maxItems", 100)
+            result["items"] = finite(result.get("items"))
+        elif result.get("type") == "string":
+            # Conservative display bounds are explicit in the generated draft
+            # and must be confirmed against the actual business response.
+            result.setdefault("maxLength", 4096)
+        return result
+
+    schema = finite(media["schema"])
+    example_definition = {"output_schema": schema,
+                          "presentation": {"field_map": {name: name for name in schema.get("properties", {})}}}
+    check_output_contract(example_definition)
+    return code, schema, example_definition["presentation"]["field_map"]
+
+
 def operation_definition(document, path, item, method, operation, pointer, refs):
     if not isinstance(operation, dict) or not isinstance(item, dict): raise ValueError("Operation must be an object")
     if method not in {"get", "post"}: raise ValueError("Only GET/POST are implemented by HTTP connector v2")
@@ -181,11 +221,21 @@ def operation_definition(document, path, item, method, operation, pointer, refs)
                             effect="READ_ONLY" if method == "get" else "WRITE",
                             connector={"kind": "http", "version": "2", "endpoint": origin.rstrip("/") + path, "method": method.upper(), "http_mapping": mapping,
                                        "http_body_required": request is not None and request.get("required") is True}).model_dump()
+    output_diagnostics = []
+    try:
+        response_code, output_schema, field_map = response_output_schema(operation)
+        definition["output_schema"] = output_schema
+        definition["presentation"]["field_map"] = field_map
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        output_diagnostics.append(diagnostic("output_review_required", "Success response is outside the finite output subset; provide and confirm a finite output contract before publication", pointer + "/responses", "review"))
     validate_mapping(definition); check_schema(definition["input_schema"])
     facts = {key: {"value": value, "source_pointer": pointer, "ref_targets": refs} for key, value in
              {"input_schema": definition["input_schema"], "connector.endpoint": definition["connector"]["endpoint"], "connector.method": method.upper(), "connector.http_mapping": mapping,
               "connector.http_body_required": definition["connector"]["http_body_required"]}.items()}
-    return definition, facts
+    if definition["output_schema"] is not None:
+        facts["output_schema"] = {"value": definition["output_schema"], "source_pointer": pointer + "/responses/" + response_code + "/content/application~1json/schema", "ref_targets": refs}
+        facts["presentation"] = {"value": definition["presentation"], "source_pointer": pointer + "/responses/" + response_code, "ref_targets": refs}
+    return definition, facts, output_diagnostics
 
 
 def parse_openapi(content):
@@ -211,8 +261,9 @@ def parse_openapi(content):
                 if row["operation_id"]:
                     if row["operation_id"] in operation_ids: raise ValueError("Duplicate operationId")
                     operation_ids.add(row["operation_id"])
-                definition, facts = operation_definition(document, path, item, method, operation, pointer, refs)
+                definition, facts, output_diagnostics = operation_definition(document, path, item, method, operation, pointer, refs)
                 row.update({"supported": True, "definition": definition, "facts": facts})
+                row["diagnostics"].extend(output_diagnostics)
                 if operation.get("security", document.get("security")):
                     row["diagnostics"].append(diagnostic("security_review", "Select a server-authorized credential reference; imported security schemes do not grant credentials", pointer + "/security", "review"))
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
