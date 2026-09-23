@@ -263,7 +263,7 @@ def publish_agent(db, agent, token, expected_revision=None):
         from .models import ActionDefinition, ActionDefinitionVersion
         from .planning import _skill_spec, validate_plan
         snapshot["dependency_profile"] = "platform-v4"
-        snapshot["prompt_policy_version"] = "planner-v1"
+        snapshot["prompt_policy_version"] = "planner-v3"
         snapshot["planning_policy"] = {"version": "finite-plan-v1", "max_steps": 8,
                                        "max_batch": 5, "max_calls": 20, "max_parallel": 3}
         candidate_by_key = {c["definition"]["connector"].get("workflow_id"): c for c in capabilities

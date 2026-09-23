@@ -101,7 +101,7 @@ def _claim_run(user_id, ws):
 def prepare_run(work):
     started = time.monotonic(); work["metrics"] = {}
     try:
-        if work.get("prompt_policy_version") == "planner-v1":
+        if work.get("prompt_policy_version") in {"planner-v1", "planner-v2", "planner-v3"}:
             from .planning import prepare
             prepare(work)
         else:

@@ -1,8 +1,10 @@
 """Workspace-scoped, immutable model versions with server-only credentials."""
 
 import json
+from typing import Literal
 from urllib.parse import urlsplit
 
+import httpx
 from pydantic import Field, SecretStr
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -10,7 +12,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import engine, set_identity
 from .models import ModelProfile, ModelProfileVersion
-from .network import checked_url, request_json
+from .network import DEEPSEEK_CHAT_COMPLETIONS_URL, checked_url, request_model_json
 from .schemas import StrictModel
 
 
@@ -20,6 +22,7 @@ class ModelConfig(StrictModel):
     model: str = Field(min_length=1, max_length=160)
     model_version: str = Field(min_length=1, max_length=160)
     timeout_seconds: float = Field(default=30, gt=0, le=120)
+    thinking_mode: Literal["default", "disabled"] = "default"
 
 
 class ModelCreate(StrictModel):
@@ -50,7 +53,9 @@ def validate_config(config):
     parsed = urlsplit(config.endpoint)
     if parsed.query or parsed.fragment:
         raise ValueError("Model endpoint cannot contain a query or fragment")
-    checked_url(config.endpoint)
+    if config.thinking_mode == "disabled" and config.endpoint != DEEPSEEK_CHAT_COMPLETIONS_URL:
+        raise ValueError("Disabled thinking is supported only by the approved DeepSeek endpoint")
+    checked_url(config.endpoint, model_endpoint=True)
     return config.model_dump()
 
 
@@ -114,7 +119,7 @@ def pinned_snapshot(profile: ModelProfile, version: ModelProfileVersion):
         raise ValueError("Pinned model credential is unavailable")
     return {"mode": "openai", "profile_id": profile.id, "version_id": version.id,
             "name": config.model, "version": config.model_version, "url": config.endpoint,
-            "temperature": 0}
+            "temperature": 0, "thinking_mode": config.thinking_mode}
 
 
 def _connection(snapshot: dict, user_id: str, workspace_id: str):
@@ -131,6 +136,8 @@ def _connection(snapshot: dict, user_id: str, workspace_id: str):
             config = ModelConfig.model_validate(version.config).model_dump()
             if any(selected.get(k) != config[v] for k, v in (("name", "model"), ("version", "model_version"),
                                                                ("url", "endpoint"))):
+                raise ValueError("Pinned model snapshot differs from its immutable version")
+            if selected.get("thinking_mode", "default") != config["thinking_mode"]:
                 raise ValueError("Pinned model snapshot differs from its immutable version")
             secret = decrypt_secret(db, version.secret_ciphertext)
         validate_config(config)
@@ -154,20 +161,58 @@ def invoke_structured(config: dict, secret: str, system: str, user: str):
         raise ValueError("Model credential is unavailable")
     body = {"model": config["model"], "temperature": 0, "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+    if config["thinking_mode"] == "disabled":
+        body["thinking"] = {"type": "disabled"}
+        body["max_tokens"] = 4096
     try:
-        response = request_json("POST", config["endpoint"], payload=body,
-                                headers={"Authorization": "Bearer " + secret}, timeout=config["timeout_seconds"])
-        content = response["choices"][0]["message"]["content"]
-        if not isinstance(content, str) or len(content) > 256_000:
+        response = request_model_json(config["endpoint"], payload=body,
+                                      headers={"Authorization": "Bearer " + secret},
+                                      timeout=config["timeout_seconds"])
+        choice = response["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise ValueError("Truncated model response")
+        content = choice["message"]["content"]
+        if not isinstance(content, str) or not content.strip() or len(content) > 256_000:
             raise ValueError("Oversize or non-text model response")
         result = json.loads(content)
         if not isinstance(result, dict):
             raise ValueError("Structured model result must be an object")
         return result
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        category = ({401: "MODEL_AUTH_REJECTED", 402: "MODEL_QUOTA_EXHAUSTED",
+                     403: "MODEL_ACCESS_FORBIDDEN", 429: "MODEL_RATE_LIMITED"}.get(status)
+                    or ("MODEL_REMOTE_FAILURE" if 500 <= status <= 599 else "MODEL_REQUEST_REJECTED"))
+        # Remote bodies can contain unreviewed data. Surface only the code and
+        # a fixed category, including to the administrator's connection test.
+        raise ValueError(f"{category} (HTTP {status})") from None
+    except httpx.TimeoutException:
+        raise ValueError("MODEL_TIMEOUT") from None
+    except httpx.RequestError:
+        raise ValueError("MODEL_NETWORK_ERROR") from None
     except Exception:
-        raise ValueError("Model endpoint unavailable or invalid structured response") from None
+        raise ValueError("MODEL_INVALID_RESPONSE") from None
 
 
 def structured_model_call(snapshot: dict, user_id: str, workspace_id: str, system: str, user: str) -> dict:
     config, secret = _connection(snapshot, user_id, workspace_id)
+    if (config["endpoint"] == DEEPSEEK_CHAT_COMPLETIONS_URL and
+            settings().env == "development" and settings().allow_public_deepseek_model_test):
+        # A development public call may include only this known synthetic
+        # 20-function catalog, never real or ad-hoc fixture descriptions.
+        from .demo.catalog import function_packages
+
+        expected = {package["key"] for package in function_packages()}
+        capabilities = snapshot.get("capabilities")
+
+        def fixture_workflow(item):
+            definition = item.get("definition") if isinstance(item, dict) else None
+            connector = definition.get("connector") if isinstance(definition, dict) else None
+            if isinstance(connector, dict) and connector.get("kind") == "fixture":
+                return connector.get("workflow_id")
+            return None
+
+        workflows = [fixture_workflow(item) for item in capabilities] if isinstance(capabilities, list) else []
+        if len(workflows) != len(expected) or set(workflows) != expected:
+            raise ValueError("Public model testing requires the 20-function demo release")
     return invoke_structured(config, secret, system, user)

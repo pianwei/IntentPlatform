@@ -1,4 +1,5 @@
 """Idempotent, development-only installation of the coherent 20-function demo."""
+from copy import deepcopy
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -61,16 +62,32 @@ def seed_demo(model_profile_id: str | None = Body(default=None, embed=True),
             action.latest_version = 1
             db.add(ActionDefinitionVersion(workspace_id=ws, action_id=action.id, version=1, definition=action.definition))
     functions = []
+    catalog_upgraded = False
     for package in function_packages(domain_ref):
         definition = Definition.model_validate(package["definition"]).model_dump()
         f = db.scalar(select(Function).where(Function.workspace_id == ws,
                                              Function.definition["connector"]["workflow_id"].as_string() == package["key"]))
+        revise_legacy_direction = False
         if f is None:
             f = Function(workspace_id=ws, definition=definition)
             db.add(f); db.flush()
         elif f.definition != definition:
-            raise HTTPException(409, "Existing demo function differs; revise and publish explicitly")
-        if not f.latest_version:
+            # The one known catalog correction adds the connector's existing
+            # IN/OUT restriction to the published input contract. Only an exact
+            # prior fixture draft may be advanced; user edits are never replaced.
+            previous = deepcopy(definition)
+            if package["key"] == "demo.transaction.list":
+                previous["input_schema"]["properties"]["direction"] = {
+                    "type": "string", "minLength": 1, "maxLength": 8}
+            if f.definition != previous:
+                raise HTTPException(409, "Existing demo function differs; revise and publish explicitly")
+            f.definition = definition
+            f.revision += 1
+            f.validation = None
+            f.validated_revision = None
+            f.status = "draft"
+            revise_legacy_direction = catalog_upgraded = True
+        if not f.latest_version or revise_legacy_direction:
             validation = validate_function(db, f, token, ValidateBody())
             if not validation["valid"]:
                 raise HTTPException(409, "Demo function validation failed: " + "; ".join(validation["errors"]))
@@ -91,32 +108,37 @@ def seed_demo(model_profile_id: str | None = Body(default=None, embed=True),
         db.add(DemoState(workspace_id=ws, state=initial_state()))
     name = "三层意图演示助手"
     agent = db.scalar(select(Agent).where(Agent.workspace_id == ws, Agent.name == name))
+    # Rechecking the demo catalog must not silently detach a configured model.
+    # An explicit profile ID selects/replaces it; omitted and null preserve it.
+    selected_model_profile_id = model_profile_id if model_profile_id is not None else (
+        agent.model_profile_id if agent is not None else None
+    )
     capability_ids = [item.id for item in functions]
     skill_ids = [item.id for item in skills]
     changed = False
     if agent is None:
         agent = Agent(workspace_id=ws, name=name, capability_ids=capability_ids,
                       planning_enabled=True, business_skill_ids=skill_ids,
-                      model_profile_id=model_profile_id,
+                      model_profile_id=selected_model_profile_id,
                       suggested_questions=["查询 C001 的所有账户余额，给我做资金概览",
                                            "分析 A001 在 2026-09-01 到 2026-09-30 的收支",
                                            "查询 C001 的客户业务全景"],
                       allowed_origins=settings().cors_origins.split(","))
         db.add(agent); db.flush()
-    elif agent.capability_ids != capability_ids or agent.business_skill_ids != skill_ids or not agent.planning_enabled or agent.model_profile_id != model_profile_id:
+    elif agent.capability_ids != capability_ids or agent.business_skill_ids != skill_ids or not agent.planning_enabled or agent.model_profile_id != selected_model_profile_id:
         agent.capability_ids = capability_ids
         agent.business_skill_ids = skill_ids
         agent.planning_enabled = True
-        agent.model_profile_id = model_profile_id
+        agent.model_profile_id = selected_model_profile_id
         agent.revision += 1
         changed = True
     published = db.get(Release, agent.current_release_id) if agent.current_release_id else None
-    if changed or not published or published.snapshot.get("prompt_policy_version") != "planner-v1":
+    if changed or catalog_upgraded or not published or published.snapshot.get("prompt_policy_version") != "planner-v3":
         publish_agent(db, agent, token, agent.revision)
     audit(db, token.user_id, ws, "demo.seed", agent.id, {"synthetic_functions": len(functions)})
     result = {"workspace_id": ws, "agent": agent_view(agent, db), "function_count": len(functions),
               "skill_count": len(skills), "domain_version": domain.latest_version,
               "chat_path": "/chat/" + agent.public_id, "embed_path": "/embed/" + agent.public_id,
-              "fixture_mode": model_profile_id is None}
+              "fixture_mode": selected_model_profile_id is None}
     db.commit()
     return result

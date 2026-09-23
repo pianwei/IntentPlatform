@@ -1,4 +1,4 @@
-"""Approved-host, private-address-only JSON transport; redirects are never followed."""
+"""Pinned JSON transport; only the model path has a narrow development public exception."""
 import ipaddress
 import socket
 import zlib
@@ -8,18 +8,42 @@ import httpx
 from .config import settings
 
 MAX_JSON_RESPONSE_BYTES = 5_000_000
+DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
+# Some development networks resolve public hosts through an RFC 2544
+# benchmarking-range TLS gateway. This range is accepted only for the exact
+# DeepSeek ModelPort exception; the original hostname still drives SNI and TLS
+# certificate validation on the DNS-pinned connection.
+DEEPSEEK_DEV_GATEWAY_RANGE = ipaddress.ip_network("198.18.0.0/15")
 
 
-def checked_url(url):
+def _public_deepseek_model_url(url):
+    cfg = settings()
+    return (cfg.env == "development" and cfg.allow_public_deepseek_model_test
+            and url == DEEPSEEK_CHAT_COMPLETIONS_URL)
+
+
+def checked_url(url, *, model_endpoint=False):
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
         raise ValueError("Endpoint must be an approved HTTP(S) URL without embedded credentials")
     allowed = {x.strip().lower() for x in settings().allowed_hosts.split(",") if x.strip()}
-    if parsed.hostname.lower() not in allowed:
+    public_model = model_endpoint and _public_deepseek_model_url(url)
+    if parsed.hostname.lower() not in allowed and not public_model:
         raise ValueError("Endpoint host is not allowlisted")
-    addresses = {x[4][0] for x in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
+    try:
+        addresses = {x[4][0] for x in socket.getaddrinfo(
+            parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM)}
+    except OSError:
+        raise ValueError("Endpoint DNS resolution failed") from None
     for raw in addresses:
         address = ipaddress.ip_address(raw)
+        if public_model:
+            # All other non-global addresses, including ordinary private and
+            # loopback ranges, remain forbidden even with the development flag.
+            if not address.is_global and address not in DEEPSEEK_DEV_GATEWAY_RANGE:
+                raise ValueError("Public model endpoint must resolve to public or approved gateway addresses")
+            continue
         if address.is_link_local or address.is_multicast or address.is_unspecified:
             raise ValueError("Unsafe endpoint address")
         if settings().env == "production" and (address.is_loopback or not address.is_private):
@@ -33,17 +57,25 @@ def checked_url(url):
 
 def request_json(method, url, *, payload=None, headers=None, timeout=10):
     return _request_json(method, url, params=payload if method == "GET" else None,
-                         json_body=payload if method != "GET" else None, headers=headers, timeout=timeout)
+                         json_body=payload if method != "GET" else None, headers=headers,
+                         timeout=timeout, model_endpoint=False)
+
+
+def request_model_json(url, *, payload, headers=None, timeout=10):
+    """ModelPort transport; no business connector receives the public exception."""
+    return _request_json("POST", url, params=None, json_body=payload, headers=headers,
+                         timeout=timeout, model_endpoint=True)
 
 
 def request_json_parts(method, url, *, params=None, json_body=None, headers=None, timeout=10):
     """HTTP-v2 transport keeps URL parameters independent from a JSON body."""
-    return _request_json(method, url, params=params, json_body=json_body, headers=headers, timeout=timeout)
+    return _request_json(method, url, params=params, json_body=json_body, headers=headers,
+                         timeout=timeout, model_endpoint=False)
 
 
-def _request_json(method, url, *, params, json_body, headers, timeout):
+def _request_json(method, url, *, params, json_body, headers, timeout, model_endpoint):
     guard_transport_headers(headers)
-    parsed, address = checked_url(url)
+    parsed, address = checked_url(url, model_endpoint=model_endpoint)
     pinned = httpx.URL(url).copy_with(host=address)
     # The pinned socket address avoids DNS rebinding between validation and connect.
     with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:

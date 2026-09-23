@@ -20,6 +20,11 @@ from .schemas import StrictModel
 
 router = APIRouter()
 PREFIX = "/api/v2/management/workspaces/{ws}/model-profiles"
+SAFE_MODEL_TEST_ERRORS = frozenset({
+    "MODEL_AUTH_REJECTED", "MODEL_QUOTA_EXHAUSTED", "MODEL_ACCESS_FORBIDDEN",
+    "MODEL_RATE_LIMITED", "MODEL_REMOTE_FAILURE", "MODEL_REQUEST_REJECTED",
+    "MODEL_TIMEOUT", "MODEL_NETWORK_ERROR", "MODEL_INVALID_RESPONSE",
+})
 
 
 class ModelVersionOut(StrictModel):
@@ -181,8 +186,10 @@ def test_model_profile(ws: str, profile_id: str, version_number: int,
                                   'Check structured JSON response support.')
         if reply.get("ready") is not True:
             raise ValueError("Model structured response did not match the test contract")
-    except ValueError:
-        raise HTTPException(502, "Model connection or structured output test failed") from None
+    except ValueError as exc:
+        category = str(exc).split(" ", 1)[0]
+        detail = category if category in SAFE_MODEL_TEST_ERRORS else "Model connection or structured output test failed"
+        raise HTTPException(502, detail) from None
     elapsed = round((monotonic() - started) * 1000, 2)
     set_identity(db, token.user_id)
     audit(db, token.user_id, ws, "model_profile.test", profile_id,

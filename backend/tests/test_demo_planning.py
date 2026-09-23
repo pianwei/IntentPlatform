@@ -42,6 +42,13 @@ def test_demo_seed_and_three_step_funds_skill(client, admin):
     agent = item["agent"]
     assert agent["planning_enabled"] is True
     assert len(agent["capability_ids"]) == 20
+    from sqlalchemy.orm import Session
+    from intent_platform.db import engine, set_identity
+    from intent_platform.models import Release
+    with Session(engine) as db:
+        set_identity(db, "dev-admin")
+        assert db.get(Release, agent["current_release_id"]).snapshot["prompt_policy_version"] == "planner-v3"
+    assert _seed(client, admin)["agent"]["current_release_id"] == agent["current_release_id"]
     cid = _conversation(client, admin, agent["id"])
     run_id = _message(client, admin, cid, "查询 C001 的所有账户余额，给我做资金概览")
     state = _drive(client, admin, run_id)
@@ -178,6 +185,152 @@ def test_model_fallback_repairs_invalid_plan_once_without_execution(monkeypatch)
     assert responses == []
 
 
+def test_planner_v2_uses_json_object_references_and_repair_instruction(monkeypatch):
+    from intent_platform.demo import function_packages
+    from intent_platform.planning import propose
+    import intent_platform.model_profiles as profiles
+
+    candidates = [{"capability_id": item["key"], "definition": item["definition"], "version": 1}
+                  for item in function_packages()]
+    responses = [
+        {"decision": "PLAN", "plan": {"inputs": {"account_id": "A001"}, "steps": [
+            {"step_id": "s1", "capability_id": "demo.account.balance",
+             "arguments": {"account_id": "{$input:account_id}"}}]}},
+        {"decision": "PLAN", "plan": {"inputs": {"account_id": "A001"}, "steps": [
+            {"step_id": "s1", "capability_id": "demo.account.balance",
+             "arguments": {"account_id": {"$input": "account_id"}}}]}},
+    ]
+    requests = []
+
+    def model_call(snapshot, user_id, workspace_id, system, prompt):
+        requests.append((system, prompt))
+        return responses.pop(0)
+
+    monkeypatch.setattr(profiles, "structured_model_call", model_call)
+    raw, source, skill = propose("查询 A001 的余额", candidates, [],
+                                {"prompt_policy_version": "planner-v2",
+                                 "model_profile": {"mode": "openai-compatible"}}, "dev-admin", "ws-dev")
+    assert source == "model" and skill is None and not responses
+    assert raw["steps"][0]["arguments"]["account_id"] == {"$input": "account_id"}
+    assert len(requests) == 2 and requests[0][0] == requests[1][0]
+    system = requests[0][0]
+    for reference in ('{"$input":"account_id"}', '{"$step":"s1","path":"data.field"}',
+                      '{"$item":"account_id"}'):
+        assert reference in system
+    assert "Argument references are JSON objects, never strings" in system
+    assert "Do not return OUT_OF_SCOPE merely because the previous plan was invalid" in requests[1][1]
+
+
+def test_planner_v1_keeps_original_pinned_prompt(monkeypatch):
+    from intent_platform.demo import function_packages
+    from intent_platform.planning import propose
+    import intent_platform.model_profiles as profiles
+
+    candidates = [{"capability_id": item["key"], "definition": item["definition"], "version": 1}
+                  for item in function_packages()]
+    seen = []
+
+    def model_call(snapshot, user_id, workspace_id, system, prompt):
+        seen.append((system, prompt))
+        return {"decision": "PLAN", "plan": {"inputs": {"account_id": "A001"}, "steps": [
+            {"step_id": "s1", "capability_id": "demo.account.balance",
+             "arguments": {"account_id": {"$input": "account_id"}}}]}}
+
+    monkeypatch.setattr(profiles, "structured_model_call", model_call)
+    propose("查询 A001 的余额", candidates, [],
+            {"prompt_policy_version": "planner-v1",
+             "model_profile": {"mode": "openai-compatible"}}, "dev-admin", "ws-dev")
+    assert "Argument references may be {$input:key}, {$step:id,path:data.field} or {$item:key}" in seen[0][0]
+    assert "Argument references are JSON objects" not in seen[0][0]
+    assert "format example" not in seen[0][0]
+
+
+def test_planner_v3_repairs_false_out_of_scope_for_named_capability_only(monkeypatch):
+    from intent_platform.demo import function_packages
+    from intent_platform.planning import propose
+    import intent_platform.model_profiles as profiles
+
+    candidates = [{"capability_id": item["key"], "definition": item["definition"], "version": 1}
+                  for item in function_packages()]
+    good = {"decision": "PLAN", "plan": {"inputs": {"account_id": "A001"}, "steps": [
+        {"step_id": "status", "capability_id": "demo.account.status",
+         "arguments": {"account_id": {"$input": "account_id"}}}]}}
+    responses = [{"decision": "OUT_OF_SCOPE"}, good]
+    requests = []
+
+    def model_call(snapshot, user_id, workspace_id, system, prompt):
+        requests.append((system, prompt))
+        return responses.pop(0)
+
+    monkeypatch.setattr(profiles, "structured_model_call", model_call)
+    raw, source, _ = propose("请查询账户状态 A001", candidates, [],
+                             {"prompt_policy_version": "planner-v3",
+                              "model_profile": {"mode": "openai-compatible"}}, "dev-admin", "ws-dev")
+    assert source == "model" and raw["steps"][0]["capability_id"] == "demo.account.status"
+    assert len(requests) == 2 and not responses
+    assert "data.customers.0.customer_id" in requests[0][0]
+    assert "two independent steps" in requests[0][0]
+    assert "named in the request" in requests[1][1]
+
+    responses = [{"decision": "OUT_OF_SCOPE"}]
+    requests.clear()
+    with pytest.raises(ValueError, match="No supported plan"):
+        propose("请办理没有登记的业务", candidates, [],
+                {"prompt_policy_version": "planner-v3",
+                 "model_profile": {"mode": "openai-compatible"}}, "dev-admin", "ws-dev")
+    assert len(requests) == 1
+
+
+def test_demo_seed_catalog_recheck_preserves_selected_model(client, admin, monkeypatch):
+    from sqlalchemy.orm import Session
+    from intent_platform.config import settings
+    from intent_platform.db import engine, set_identity
+    from intent_platform.models import Agent, Release
+
+    agent = _seed(client, admin)["agent"]
+    previous_profile = agent["model_profile_id"]
+    previous_release = agent["current_release_id"]
+    monkeypatch.setattr(settings(), "model_secret_key", "local-test-master-key-keep-out-of-repo")
+    profile = client.post("/api/v2/management/workspaces/ws-dev/model-profiles", headers=admin,
+                          json={"name": "演示核对模型-" + uuid.uuid4().hex[:8],
+                                "config": {"protocol": "openai-compatible",
+                                           "endpoint": "http://127.0.0.1:19999/v1/chat/completions",
+                                           "model": "synthetic-test-model", "model_version": "test-v1",
+                                           "timeout_seconds": 7},
+                                "api_key": "local-test-api-secret"})
+    assert profile.status_code == 201, profile.text
+    profile_id = profile.json()["id"]
+    try:
+        attached = client.post("/api/v2/dev/demo/seed", headers=admin,
+                               json={"model_profile_id": profile_id})
+        assert attached.status_code == 200, attached.text
+        selected = attached.json()["agent"]
+        assert selected["model_profile_id"] == profile_id
+        assert attached.json()["fixture_mode"] is False
+        release_id = selected["current_release_id"]
+        with Session(engine) as db:
+            set_identity(db, "dev-admin")
+            pinned = db.get(Release, release_id).snapshot
+            assert pinned["model_profile"]["profile_id"] == profile_id
+            assert pinned["prompt_policy_version"] == "planner-v3"
+            assert db.get(Release, previous_release).snapshot["prompt_policy_version"] == "planner-v3"
+        for body in ({}, {"model_profile_id": None}):
+            rechecked = client.post("/api/v2/dev/demo/seed", headers=admin, json=body)
+            assert rechecked.status_code == 200, rechecked.text
+            assert rechecked.json()["agent"]["model_profile_id"] == profile_id
+            assert rechecked.json()["agent"]["current_release_id"] == release_id
+            assert rechecked.json()["fixture_mode"] is False
+    finally:
+        # Keep the shared integration-test demo on its previous release. The
+        # model-backed release stays immutable for the pinning assertions.
+        with Session(engine) as db, db.begin():
+            set_identity(db, "dev-admin")
+            restored = db.get(Agent, agent["id"])
+            restored.model_profile_id = previous_profile
+            restored.current_release_id = previous_release
+            restored.revision += 1
+
+
 def test_model_fallback_may_request_one_clarification(monkeypatch):
     from intent_platform.planning import propose
     import intent_platform.model_profiles as profiles
@@ -209,6 +362,38 @@ def test_model_repairs_malformed_response_and_unavailable_skill(monkeypatch):
                                     {"model_profile": {"mode": "openai-compatible"}}, "dev-admin", "ws-dev")
         assert source == "model" and skill is None and raw["steps"][0]["step_id"] == "balance"
         assert responses == []
+
+
+def test_model_cannot_select_unmatched_skill_for_narrow_request(monkeypatch):
+    from intent_platform.demo import function_packages
+    from intent_platform.demo.skills import business_skill_templates
+    from intent_platform.planning import propose
+    import intent_platform.model_profiles as profiles
+
+    candidates = [{"capability_id": item["key"], "definition": item["definition"], "version": 1}
+                  for item in function_packages()]
+    skill = next(item for item in business_skill_templates() if item["key"] == "demo.skill.customer_panorama")
+    responses = [
+        {"decision": "SKILL", "skill_key": skill["key"], "inputs": {"customer_query": "C001"}},
+        {"decision": "PLAN", "plan": {"inputs": {"customer_id": "C001"}, "steps": [
+            {"step_id": "detail", "capability_id": "demo.customer.detail",
+             "arguments": {"customer_id": {"$input": "customer_id"}}}]}}
+    ]
+    prompts = []
+
+    def model_call(*args):
+        prompts.append(args[3])
+        return responses.pop(0)
+
+    monkeypatch.setattr(profiles, "structured_model_call", model_call)
+    raw, source, skill_id = propose("客户 C001 的姓名和城市是什么？", candidates,
+                                   [{"definition": skill, "version_id": "panorama:v1"}],
+                                   {"model_profile": {"mode": "openai-compatible"},
+                                   "prompt_policy_version": "planner-v3"}, "dev-admin", "ws-dev")
+    assert source == "model" and skill_id is None
+    assert raw["steps"][0]["capability_id"] == "demo.customer.detail"
+    assert "demo.skill.customer_panorama" not in prompts[0]
+    assert responses == []
 
 
 def test_matching_demo_skill_precedes_configured_model(monkeypatch):
@@ -338,3 +523,44 @@ def test_seeded_business_skill_can_be_edited_without_mutating_published_release(
     with Session(engine) as db:
         set_identity(db, "dev-admin")
         assert db.get(Release, agent["current_release_id"]).snapshot["business_skills"] == before
+
+
+def test_demo_direction_contract_is_versioned_on_legacy_catalog_upgrade(client, admin):
+    from copy import deepcopy
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    from intent_platform.db import engine, set_identity
+    from intent_platform.models import Function, Release
+    from intent_platform.ontology import input_errors
+
+    agent = _seed(client, admin)["agent"]
+    with Session(engine) as db, db.begin():
+        set_identity(db, "dev-admin")
+        function = next(row for row in db.scalars(select(Function))
+                        if row.definition["connector"].get("workflow_id") == "demo.transaction.list")
+        function_id = function.id
+        previous_version = function.latest_version
+        previous_release_id = agent["current_release_id"]
+        old_draft = deepcopy(function.definition)
+        old_draft["input_schema"]["properties"]["direction"] = {
+            "type": "string", "minLength": 1, "maxLength": 8}
+        function.definition = old_draft
+        function.revision += 1
+    updated = _seed(client, admin)["agent"]
+    with Session(engine) as db:
+        set_identity(db, "dev-admin")
+        function = db.get(Function, function_id)
+        assert function.latest_version == previous_version + 1
+        schema = function.definition["input_schema"]
+        args = {"account_id": "A001", "direction": "支出"}
+        assert input_errors(schema, args)
+        assert not input_errors(schema, {**args, "direction": "OUT"})
+        assert updated["current_release_id"] != previous_release_id
+        old = db.get(Release, previous_release_id)
+        new = db.get(Release, updated["current_release_id"])
+        assert old.snapshot["prompt_policy_version"] == "planner-v3"
+        old_version = next(item["version"] for item in old.snapshot["capabilities"]
+                           if item["definition"]["connector"].get("workflow_id") == "demo.transaction.list")
+        new_version = next(item["version"] for item in new.snapshot["capabilities"]
+                           if item["definition"]["connector"].get("workflow_id") == "demo.transaction.list")
+        assert (old_version, new_version) == (previous_version, previous_version + 1)

@@ -243,6 +243,8 @@ ROUTING_PROMPTS["router-v2"] = (
 from .routing_v3 import PROMPT_V3
 ROUTING_PROMPTS["router-v3"] = PROMPT_V3
 ROUTING_PROMPTS["planner-v1"] = "Finite planner-v1 is handled by the persistent planning worker"
+ROUTING_PROMPTS["planner-v2"] = "Finite planner-v2 is handled by the persistent planning worker"
+ROUTING_PROMPTS["planner-v3"] = "Finite planner-v3 is handled by the persistent planning worker"
 
 
 def route_model(text, candidates, answers=None, policy_version="router-v1", context=None):

@@ -22,7 +22,7 @@ try {
         & docker @dockerArgs compose exec -T postgres psql -U intent_admin -d $TestDatabase -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
         Check-Exit 'Test pgcrypto preparation'
         $backendRoot = Join-Path $projectRoot 'backend'
-        & docker @dockerArgs compose --profile app run --rm --no-deps -v "${backendRoot}:/app" -e INTENT_ENV=test -e INTENT_DATABASE_URL=postgresql+psycopg://intent_app:local-app-only@postgres:5432/$TestDatabase -e INTENT_MIGRATION_DATABASE_URL=postgresql+psycopg://intent_owner:local-owner-only@postgres:5432/$TestDatabase migrate python -m pytest -q
+        & docker @dockerArgs compose --profile app run --rm --no-deps -v "${backendRoot}:/app" -e INTENT_ENV=test -e INTENT_ALLOW_PUBLIC_DEEPSEEK_MODEL_TEST=false -e INTENT_DATABASE_URL=postgresql+psycopg://intent_app:local-app-only@postgres:5432/$TestDatabase -e INTENT_MIGRATION_DATABASE_URL=postgresql+psycopg://intent_owner:local-owner-only@postgres:5432/$TestDatabase migrate python -m pytest -q
         Check-Exit 'Backend tests'
     }
     if ($Scope -in @('frontend','all')) {

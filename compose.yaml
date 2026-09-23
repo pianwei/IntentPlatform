@@ -3,7 +3,8 @@ x-runtime-environment: &runtime-environment
   INTENT_ENV: development
   INTENT_DATABASE_URL: postgresql+psycopg://intent_app:local-app-only@postgres:5432/intent
   INTENT_MODEL_MODE: fixture
-  INTENT_MODEL_SECRET_KEY: development-demo-only-key-change-for-private-use
+  INTENT_MODEL_SECRET_KEY: ${INTENT_MODEL_SECRET_KEY:-development-demo-only-key-change-for-private-use}
+  INTENT_ALLOW_PUBLIC_DEEPSEEK_MODEL_TEST: ${INTENT_ALLOW_PUBLIC_DEEPSEEK_MODEL_TEST:-false}
   INTENT_ALLOW_DEV_AUTH: "true"
   INTENT_ALLOWED_HOSTS: localhost,127.0.0.1,api
   INTENT_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173

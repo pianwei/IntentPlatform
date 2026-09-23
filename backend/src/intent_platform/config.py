@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     model_api_key: str = ""
     model_secret_key: str = ""
     model_timeout: float = 30
+    # Only a local development run may explicitly reach DeepSeek's public API.
+    # Business connectors continue to use the private-address transport.
+    allow_public_deepseek_model_test: bool = False
     allowed_hosts: str = "localhost,127.0.0.1"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     identity_introspection_url: str = ""
@@ -96,6 +99,8 @@ class Settings(BaseSettings):
             raise ValueError("Unknown environment")
         if self.model_mode not in {"fixture", "openai"}:
             raise ValueError("model_mode must be fixture or openai")
+        if self.allow_public_deepseek_model_test and self.env != "development":
+            raise ValueError("Public DeepSeek model testing is development-only")
         if not 1 <= self.ingest_max_concurrency_per_workspace <= 16 or not 1 <= self.ingest_max_queued_per_workspace <= 500 or not 30 <= self.ingest_lease_seconds <= 3600:
             raise ValueError("Ingest concurrency, queue and lease limits are outside the finite bounds")
         if self.env == "production":
