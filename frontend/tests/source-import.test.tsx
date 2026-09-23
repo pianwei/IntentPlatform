@@ -29,7 +29,7 @@ it("does not invalidate source review when an edited candidate only changes obje
   expect(screen.getByRole("button", { name: "保存完整引用列表" })).toBeDisabled();
   expect(onReview).toHaveBeenLastCalledWith(review);
 });
-function documentsGet(api: ApiClient) { return vi.spyOn(api, "get").mockImplementation(async path => (path.endsWith("/documents") ? [{ id: "doc", filename: "source.yaml", latest_revision: 2 }] : path.endsWith("/versions") ? [document, legacy] : document) as never); }
+function documentsGet(api: ApiClient, extra: Record<string, unknown> = {}) { return vi.spyOn(api, "get").mockImplementation(async path => (extra[path] ?? (path.endsWith("/documents") ? [{ id: "doc", filename: "source.yaml", latest_revision: 2 }] : path.endsWith("/versions") ? [document, legacy] : document)) as never); }
 it("pins old document text while uploading a new revision against the latest revision; stale failure retains file", async () => {
   const api = new ApiClient("management"); documentsGet(api); const request = vi.spyOn(api, "request").mockRejectedValue(new ApiError(409, "Document revision changed"));
   render(<DocumentLibrary api={api} workspace="ws" writable />);
@@ -38,17 +38,82 @@ it("pins old document text while uploading a new revision against the latest rev
   expect(screen.getByRole("button", { name: "下载原始文件" })).toBeDisabled();
   const file = new File(["new text"], "new.md"); fireEvent.change(screen.getByLabelText("上传资料文件"), { target: { files: [file] } }); fireEvent.click(screen.getByLabelText(/为所选文档追加修订/)); fireEvent.click(screen.getByRole("button", { name: "上传新修订" }));
   await screen.findByText(/Document revision changed/); const body = request.mock.calls[0][1]?.body as FormData;
-  expect(request.mock.calls[0][0]).toBe("/api/v2/management/workspaces/ws/documents/doc/versions"); expect(body.get("expected_revision")).toBe("2"); expect(body.get("file")).toBe(file); expect(screen.getByRole("button", { name: "上传新修订" })).toBeEnabled();
+  expect(request.mock.calls[0][0]).toBe("/api/v2/management/workspaces/ws/ingest-jobs/documents/doc/versions"); expect(body.get("expected_revision")).toBe("2"); expect(body.get("file")).toBe(file); expect(request.mock.calls[0][1]?.headers).toHaveProperty("Idempotency-Key"); expect(screen.getByRole("button", { name: "上传新修订" })).toBeEnabled();
+});
+it("fetches the exact document revision after an asynchronous upload completes", async () => {
+  const api = new ApiClient("management");
+  const created: SourceDocument = { ...document, id: "new-doc", revision: 1, filename: "new.md", source: { document_id: "new-doc", revision: 1 } };
+  const get = vi.spyOn(api, "get").mockImplementation(async path => {
+    if (path.endsWith("/documents")) return [{ id: "new-doc", filename: "new.md", latest_revision: 1 }] as never;
+    if (path.endsWith("/ingest-jobs/job")) return { job_id: "job", kind: "DOCUMENT_CREATE", status: "SUCCEEDED", result: { document_id: "new-doc", revision: 1 }, error: null } as never;
+    if (path.endsWith("/new-doc/versions")) return [created] as never;
+    if (path.endsWith("/new-doc/versions/1")) return created as never;
+    throw new Error(`Unexpected GET: ${path}`);
+  });
+  const request = vi.spyOn(api, "request").mockResolvedValue({ job_id: "job", status: "PENDING" });
+  render(<DocumentLibrary api={api} workspace="ws" writable />);
+  const file = new File(["new text"], "new.md");
+  fireEvent.change(screen.getByLabelText("上传资料文件"), { target: { files: [file] } });
+  fireEvent.click(screen.getByRole("button", { name: "上传为新文档" }));
+  expect(await screen.findByText("new-doc / revision 1")).toBeInTheDocument();
+  expect(request.mock.calls[0][0]).toBe("/api/v2/management/workspaces/ws/ingest-jobs/documents");
+  expect((request.mock.calls[0][1]?.body as FormData).get("file")).toBe(file);
+  expect(get).toHaveBeenCalledWith("/api/v2/management/workspaces/ws/documents/new-doc/versions/1", expect.any(AbortSignal));
+});
+it("uses a fresh idempotency key when a completed failed job is retried", async () => {
+  const api = new ApiClient("management");
+  const get = vi.spyOn(api, "get").mockImplementation(async path => {
+    if (path.endsWith("/documents")) return [] as never;
+    if (path.endsWith("/ingest-jobs/failed")) return { job_id: "failed", status: "FAILED", error: { code: "DOCUMENT_PARSE_ERROR", message: "无法解析" }, result: null } as never;
+    if (path.endsWith("/ingest-jobs/succeeded")) return { job_id: "succeeded", status: "SUCCEEDED", error: null, result: { document_id: "new-doc", revision: 1 } } as never;
+    if (path.endsWith("/new-doc/versions/1")) return { ...document, id: "new-doc", revision: 1, source: { document_id: "new-doc", revision: 1 } } as never;
+    if (path.endsWith("/new-doc/versions")) return [{ ...document, id: "new-doc", revision: 1, source: { document_id: "new-doc", revision: 1 } }] as never;
+    throw new Error(`Unexpected GET: ${path}`);
+  });
+  const request = vi.spyOn(api, "request").mockResolvedValueOnce({ job_id: "failed", status: "PENDING" }).mockResolvedValueOnce({ job_id: "succeeded", status: "PENDING" });
+  render(<DocumentLibrary api={api} workspace="ws" writable />);
+  fireEvent.change(screen.getByLabelText("上传资料文件"), { target: { files: [new File(["source"], "source.md")] } });
+  fireEvent.click(screen.getByRole("button", { name: "上传为新文档" }));
+  await screen.findByText(/无法解析/);
+  fireEvent.click(screen.getByRole("button", { name: "上传为新文档" }));
+  await screen.findByText("new-doc / revision 1");
+  expect(request).toHaveBeenCalledTimes(2);
+  const firstKey = (request.mock.calls[0][1]?.headers as Record<string, string>)["Idempotency-Key"];
+  const secondKey = (request.mock.calls[1][1]?.headers as Record<string, string>)["Idempotency-Key"];
+  expect(firstKey).not.toBe(secondKey);
+  expect(get).toHaveBeenCalledWith("/api/v2/management/workspaces/ws/ingest-jobs/succeeded", expect.any(AbortSignal));
 });
 it("parses the selected immutable document on the server and creates only a supported operation", async () => {
-  const api = new ApiClient("management"); documentsGet(api);
+  const api = new ApiClient("management");
   const report: OpenAPIImport = { id: "import", document_id: "doc", document_revision: 1, parser_version: "finite-test", valid: true, diagnostics: [], operations: [{ key: "POST /items/{id}", method: "POST", path: "/items/{id}", operation_id: "test", summary: "合成接口", source_pointer: "/paths/items", supported: true, diagnostics: [], definition, facts: {} }, { key: "DELETE /items", method: "DELETE", path: "/items", operation_id: null, summary: "不支持操作", source_pointer: "/paths/items/delete", supported: false, diagnostics: [{ code: "METHOD", message: "Only GET/POST", pointer: "/paths/items/delete", severity: "error" }], definition: null, facts: {} }] };
-  const post = vi.spyOn(api, "post").mockImplementation(async path => (path.endsWith("/openapi-imports") ? report : capability) as never); const created = vi.fn().mockResolvedValue(undefined);
+  documentsGet(api, {
+    "/api/v2/management/workspaces/ws/ingest-jobs/job": { job_id: "job", kind: "OPENAPI_IMPORT", status: "SUCCEEDED", result: { import_id: "import", document_id: "doc", revision: 1 }, error: null },
+    "/api/v2/management/workspaces/ws/openapi-imports/import": report,
+  });
+  const request = vi.spyOn(api, "request").mockResolvedValue({ job_id: "job", status: "PENDING" });
+  const post = vi.spyOn(api, "post").mockResolvedValue(capability); const created = vi.fn().mockResolvedValue(undefined);
   render(<OpenAPIWizard api={api} workspace="ws" writable onCreated={created} />);
   await screen.findByRole("option", { name: "source.yaml · 最新 r2" }); fireEvent.change(screen.getByLabelText("来源文档"), { target: { value: "doc" } }); await screen.findByRole("option", { name: "r1 · source.yaml" }); fireEvent.change(screen.getByLabelText("原文修订"), { target: { value: "1" } }); fireEvent.click(screen.getByRole("button", { name: "使用此文档修订" })); fireEvent.click(screen.getByRole("button", { name: "服务端解析此修订" }));
-  await screen.findByLabelText("选择接口操作"); expect(post).toHaveBeenCalledWith("/api/v2/management/workspaces/ws/openapi-imports", { document_id: "doc", revision: 1 }); expect(screen.getByRole("option", { name: /DELETE/ })).toBeDisabled();
+  await screen.findByLabelText("选择接口操作"); expect(request.mock.calls[0][0]).toBe("/api/v2/management/workspaces/ws/ingest-jobs/openapi-imports"); expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toEqual({ document_id: "doc", revision: 1 }); expect(request.mock.calls[0][1]?.headers).toHaveProperty("Idempotency-Key"); expect(screen.getByRole("option", { name: /DELETE/ })).toBeDisabled();
   fireEvent.change(screen.getByLabelText("选择接口操作"), { target: { value: "POST /items/{id}" } }); fireEvent.click(screen.getByRole("button", { name: "生成待审查功能草稿" }));
-  await waitFor(() => expect(created).toHaveBeenCalledWith(capability)); expect(post.mock.calls[1]).toEqual(["/api/v2/management/workspaces/ws/openapi-imports/import/functions", { operation_key: "POST /items/{id}", name: "导入测试", description: "合成接口" }]);
+  await waitFor(() => expect(created).toHaveBeenCalledWith(capability)); expect(post.mock.calls[0]).toEqual(["/api/v2/management/workspaces/ws/openapi-imports/import/functions", { operation_key: "POST /items/{id}", name: "导入测试", description: "合成接口" }]);
+});
+it("shows bounded OpenAPI failure locations from the background job", async () => {
+  const api = new ApiClient("management");
+  documentsGet(api, {
+    "/api/v2/management/workspaces/ws/ingest-jobs/invalid": { job_id: "invalid", kind: "openapi.parse", status: "FAILED", result: null,
+      error: { code: "OPENAPI_UNSUPPORTED", message: "No supported operation", diagnostics: [{ code: "unsupported_operation", message: "响应结构不支持", pointer: "#/paths/~1items/get/responses" }] } },
+  });
+  vi.spyOn(api, "request").mockResolvedValue({ job_id: "invalid", status: "PENDING" });
+  render(<OpenAPIWizard api={api} workspace="ws" writable onCreated={vi.fn()} />);
+  await screen.findByRole("option", { name: "source.yaml · 最新 r2" });
+  fireEvent.change(screen.getByLabelText("来源文档"), { target: { value: "doc" } });
+  await screen.findByRole("button", { name: "使用此文档修订" });
+  fireEvent.click(screen.getByRole("button", { name: "使用此文档修订" }));
+  fireEvent.click(screen.getByRole("button", { name: "服务端解析此修订" }));
+  expect(await screen.findByText("响应结构不支持")).toBeInTheDocument();
+  expect(screen.getByText("#/paths/~1items/get/responses")).toBeInTheDocument();
+  expect(screen.queryByLabelText("选择接口操作")).not.toBeInTheDocument();
 });
 it("keeps colliding query/body names as separate positions and refuses an overwrite on moving rows", () => {
   let current = definition;

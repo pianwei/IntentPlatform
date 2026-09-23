@@ -66,6 +66,15 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+  ingest-worker:
+    image: ${INTENT_BACKEND_IMAGE:?Set the reviewed backend image tag}
+    pull_policy: never
+    environment: *runtime-environment
+    command: [python, -m, intent_platform.ingest_worker]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
   web:
     image: ${INTENT_WEB_IMAGE:?Set the reviewed production web image tag}
     pull_policy: never

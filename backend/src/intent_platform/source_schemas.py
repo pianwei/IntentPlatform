@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal
 from pydantic import Field
 from .schemas import StrictModel
@@ -31,6 +32,19 @@ class DocumentSummary(StrictModel):
 class ImportRequest(StrictModel):
     document_id: str
     revision: int = Field(ge=1)
+
+
+class IngestAccepted(StrictModel):
+    job_id: str
+    status: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED"]
+
+
+class IngestJobOut(IngestAccepted):
+    kind: Literal["document.create", "document.revise", "openapi.parse"]
+    created_at: datetime
+    updated_at: datetime
+    result: dict | None = None
+    error: dict | None = None
 
 
 class Diagnostic(StrictModel):

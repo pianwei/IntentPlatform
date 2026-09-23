@@ -629,6 +629,8 @@ from .evaluation_api import router as evaluation_router
 app.include_router(evaluation_router)
 from .source_api import router as source_router
 app.include_router(source_router)
+from .ingest_api import router as ingest_router
+app.include_router(ingest_router)
 from .governance_api import router as governance_router
 app.include_router(governance_router)
 from .shadow_api import router as shadow_router

@@ -243,6 +243,29 @@ class OpenAPIImport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class IngestJob(Base):
+    __tablename__ = "ingest_jobs"
+    __table_args__ = (UniqueConstraint("workspace_id", "created_by", "idempotency_key"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("ingest"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    created_by: Mapped[str]
+    token_id: Mapped[str]
+    idempotency_key: Mapped[str]
+    kind: Mapped[str]
+    status: Mapped[str] = mapped_column(default="PENDING")
+    filename: Mapped[str | None]
+    payload: Mapped[bytes | None] = mapped_column(LargeBinary)
+    document_id: Mapped[str | None]
+    source_revision: Mapped[int | None]
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[dict | None] = mapped_column(JSONB)
+    attempt_id: Mapped[str | None]
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Evaluation(Base):
     __tablename__ = "evaluations"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("eval"))

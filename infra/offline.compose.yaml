@@ -53,6 +53,14 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+  ingest-worker:
+    image: intent-backend:local
+    pull_policy: never
+    environment: *environment
+    command: [python, -m, intent_platform.ingest_worker]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
   web:
     image: intent-web:local
     pull_policy: never

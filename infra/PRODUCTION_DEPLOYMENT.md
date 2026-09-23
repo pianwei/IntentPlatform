@@ -21,6 +21,6 @@ docker compose --env-file .env.production -f infra/production.compose.yaml run -
 
 Compose 对缺失字段直接失败。`preflight` 再检查正式配置、可信身份与成员目录、数据库双角色能连接且均无超级用户或 BYPASSRLS 权限；它只读，不迁移业务数据。后端 API 和 Worker 在正式模式也会独立执行静态启动校验。正式 Web 镜像应使用 `infra/frontend.Dockerfile` 默认 `build` 制作，且确认容器内不存在 `/usr/share/nginx/html/console/dev-host.html`；不得传入 `BUILD_SCRIPT=build:development`。
 
-完成候选审核、备份与恢复准备和实际授权后，部署操作才可使用同一 Compose 文件执行。`migrate` 在 `preflight` 成功后执行，API/Worker 在迁移成功后启动；`web` 只指向已健康的 API。部署成功仍需核对实际入口、身份、授权、真实业务和日志，不自动成为 M1–M3 验收。
+完成候选审核、备份与恢复准备和实际授权后，部署操作才可使用同一 Compose 文件执行。`migrate` 在 `preflight` 成功后执行，API、在线 Worker 与独立 `ingest-worker` 在迁移成功后启动；`web` 只指向已健康的 API。新上传在正式模式进入受 RLS 保护的数据库任务队列；确认数据库容量、原始材料保留周期、空间接入并发和队列上限后再准入。部署成功仍需核对实际入口、身份、授权、真实业务和日志，不自动成为 M1–M3 验收。
 
 版本、镜像及配置应关联同一候选记录。旧模型、工作流和功能依赖必须保留或明确不可用；权限撤销不能因回滚复活。密钥轮换、正式备份身份、RTO/RPO、网络准入和恢复演练由内网责任人确认。

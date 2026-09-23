@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     token_seconds: int = 3600
     ticket_seconds: int = 60
     max_upload_bytes: int = 10_000_000
+    ingest_max_concurrency_per_workspace: int = 2
+    ingest_max_queued_per_workspace: int = 20
+    ingest_lease_seconds: int = 120
     resolvers_json: str = "{}"
     workspace_timezones_json: str = "{}"
     integrations_json: str = "{}"
@@ -92,6 +95,8 @@ class Settings(BaseSettings):
             raise ValueError("Unknown environment")
         if self.model_mode not in {"fixture", "openai"}:
             raise ValueError("model_mode must be fixture or openai")
+        if not 1 <= self.ingest_max_concurrency_per_workspace <= 16 or not 1 <= self.ingest_max_queued_per_workspace <= 500 or not 30 <= self.ingest_lease_seconds <= 3600:
+            raise ValueError("Ingest concurrency, queue and lease limits are outside the finite bounds")
         if self.env == "production":
             if self.allow_dev_auth or self.model_mode == "fixture":
                 raise ValueError("Production forbids development identity and fixture model")

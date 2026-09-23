@@ -61,6 +61,15 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+  ingest-worker:
+    profiles: [app]
+    image: intent-backend:local
+    environment: *runtime-environment
+    command: ["python", "-m", "intent_platform.ingest_worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
   web:
     profiles: [app]
     build:
