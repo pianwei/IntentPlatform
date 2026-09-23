@@ -1,0 +1,66 @@
+name: intent-offline-check
+# Local engineering check only: fresh database, cached images, no external network or host ports.
+x-environment: &environment
+  INTENT_ENV: development
+  INTENT_DATABASE_URL: postgresql+psycopg://intent_app:local-app-only@postgres:5432/intent
+  INTENT_MODEL_MODE: fixture
+  INTENT_ALLOW_DEV_AUTH: "true"
+  INTENT_ALLOWED_HOSTS: localhost,127.0.0.1,api,web
+  INTENT_CORS_ORIGINS: http://localhost:5173
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    pull_policy: never
+    environment:
+      POSTGRES_DB: intent
+      POSTGRES_USER: intent_admin
+      POSTGRES_PASSWORD: local-admin-only
+    volumes:
+      - data:/var/lib/postgresql/data
+      - ./postgres/001_roles.sql:/docker-entrypoint-initdb.d/001_roles.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U intent_admin -d intent"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+  migrate:
+    image: intent-backend:local
+    pull_policy: never
+    environment:
+      <<: *environment
+      INTENT_MIGRATION_DATABASE_URL: postgresql+psycopg://intent_owner:local-owner-only@postgres:5432/intent
+    command: [python, -m, intent_platform.migrate]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    image: intent-backend:local
+    pull_policy: never
+    environment: *environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+  worker:
+    image: intent-backend:local
+    pull_policy: never
+    environment: *environment
+    command: [python, -m, intent_platform.worker]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  web:
+    image: intent-web:local
+    pull_policy: never
+    depends_on:
+      api:
+        condition: service_healthy
+networks:
+  default:
+    internal: true
+volumes:
+  data:

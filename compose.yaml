@@ -1,0 +1,79 @@
+name: intent-local
+x-runtime-environment: &runtime-environment
+  INTENT_ENV: development
+  INTENT_DATABASE_URL: postgresql+psycopg://intent_app:local-app-only@postgres:5432/intent
+  INTENT_MODEL_MODE: fixture
+  INTENT_ALLOW_DEV_AUTH: "true"
+  INTENT_ALLOWED_HOSTS: localhost,127.0.0.1,api
+  INTENT_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: intent
+      POSTGRES_USER: intent_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-admin-only}
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - intent_pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/001_roles.sql:/docker-entrypoint-initdb.d/001_roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U intent_admin -d intent"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    profiles: [app]
+    build:
+      context: .
+      dockerfile: infra/backend.Dockerfile
+    image: intent-backend:local
+    environment:
+      <<: *runtime-environment
+      INTENT_MIGRATION_DATABASE_URL: postgresql+psycopg://intent_owner:local-owner-only@postgres:5432/intent
+    command: ["python", "-m", "intent_platform.migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    profiles: [app]
+    image: intent-backend:local
+    environment: *runtime-environment
+    expose:
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+  worker:
+    profiles: [app]
+    image: intent-backend:local
+    environment: *runtime-environment
+    command: ["python", "-m", "intent_platform.worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  web:
+    profiles: [app]
+    build:
+      context: .
+      dockerfile: infra/frontend.Dockerfile
+      args:
+        BUILD_SCRIPT: build:development
+    image: intent-web:local
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  intent_pgdata:

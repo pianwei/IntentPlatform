@@ -1,0 +1,6 @@
+# Project-local dependency caches and generated frontend output.
+.cache/
+.npm-cache/
+node_modules/
+dist/
+coverage/

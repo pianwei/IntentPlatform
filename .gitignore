@@ -1,0 +1,25 @@
+# Local environment and generated artifacts
+.env
+.env.*
+!.env.example
+!.env.*.example
+.venv/
+**/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+**/node_modules/
+**/dist/
+**/coverage/
+.cache/
+.local/
+output/
+方案/*.docx
+backend/build/
+*.egg-info/
+*.log
+frontend/playwright-report/
+frontend/test-results/
+output/playwright/.playwright-cli/
+.superdesign/tmp/

@@ -1,0 +1,37 @@
+{
+  "name": "intent-platform-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:console": "vite --config console/vite.config.ts",
+    "dev:agent": "vite --config agent-web/vite.config.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build --config console/vite.config.ts && vite build --config agent-web/vite.config.ts",
+    "build:development": "npm run typecheck && vite build --mode development --config console/vite.config.ts && vite build --mode development --config agent-web/vite.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "0.10.49",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "lucide-react": "0.468.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@testing-library/user-event": "14.5.2",
+    "@types/node": "20.17.10",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "jsdom": "25.0.1",
+    "typescript": "5.6.3",
+    "vite": "5.4.21",
+    "vitest": "2.1.8"
+  },
+  "engines": {
+    "node": ">=20.10.0"
+  }
+}
