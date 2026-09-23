@@ -194,7 +194,7 @@ def test_historical_selection_is_explicit_same_conversation_and_revocable(client
     assert client.post(f"/api/v2/runtime/runs/{rid}/answers", headers=app["headers"], json=answer).status_code == 200
     drain(); run = read(client, app, rid)
     assert run["status"] == "SUCCEEDED" and run["proposal"]["requests"][0]["arguments"]["item_id"] == "synthetic-2"
-    assert run["bindings"][0]["source_call_id"] == call_id and run["bindings"][0]["index"] == 1
+    assert run["bindings"] == []  # Historical source IDs remain server-side diagnostics.
     cid = conversation(client, app["headers"], app["agent"]["id"])
     other = {**app, "cid": cid}
     _, cross = send(client, other, f"history_target={call_id}|items|0")

@@ -1,4 +1,5 @@
 -- Local development only. Production roles and secrets are supplied by the bank.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE ROLE intent_owner LOGIN PASSWORD 'local-owner-only' NOSUPERUSER NOBYPASSRLS;
 CREATE ROLE intent_app LOGIN PASSWORD 'local-app-only' NOSUPERUSER NOBYPASSRLS;
 ALTER SCHEMA public OWNER TO intent_owner;

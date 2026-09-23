@@ -21,5 +21,6 @@ backend/build/
 *.log
 frontend/playwright-report/
 frontend/test-results/
+.playwright-cli/
 output/playwright/.playwright-cli/
 .superdesign/tmp/

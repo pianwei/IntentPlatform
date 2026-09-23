@@ -49,7 +49,7 @@
 |---|---|---|
 | 后端单元/集成 | `./scripts/verify-local.ps1 backend`；套件 `backend/tests/`，源配置 `backend/pyproject.toml` | 独立 intent_test 数据库，真实受限 PostgreSQL 角色；通过条件为 pytest 全部通过，不指向演示库 |
 | Console / Agent Web 类型、组件和构建 | `./scripts/verify-local.ps1 frontend`；frontend目录 `npm test`、`npm run build` | package-lock固定依赖；脚本用Linux Node环境安装、测试并构建两应用，任一失败中止 |
-| 全部现有软件入口 | `./scripts/verify-local.ps1 all` | 后端全部已建测试 + 前端全部已建测试/类型/正式模式构建；仍不等于M3全量范围 |
+| 全部现有软件入口 | `./scripts/verify-local.ps1 all`；避免既有测试任务残留相互影响时用新的 `-TestDatabase intent_..._test` 参数 | 后端全部已建测试 + 前端全部已建测试/类型/正式模式构建；独立测试库必须以 `intent_` 起始、`_test` 结尾，脚本只创建不存在的库，不删除既有证据；仍不等于M3全量范围 |
 | 开发模式集成构建 | `./scripts/dev.ps1 up`；frontend目录 `npm run build:development` | Compose显式启用开发构建，正式默认build不得显示开发身份/夹具宿主 |
 | 浏览器与宿主端到端 | 本地 Playwright CLI 操作路径及截图见[INT-009记录](records/INT-009-unified-apps.md) | 已测本地跨站开发宿主及CDP实际阻断第三方Cookie；正式外围宿主和支持浏览器矩阵仍待验证 |
 | Agent S1/S2/S3 评测与评分 | backend目录`./.venv/Scripts/python.exe -m pytest tests/test_evaluation_scoring.py tests/test_evaluation_runner.py tests/test_evaluation_archive_integrity.py -q`；CLI `./.venv/Scripts/python.exe scripts/evaluate.py --help`，契约见`backend/EVALUATION_CONTRACT.md`；Console评测诊断可读取严格trial归档 | 执行器可驱动实际运行API，报告保留原分母及未观察项；合成数据、固定模型和本地PG只证明工具，冻结金标、模型/功能配置仍待提供 |
@@ -69,6 +69,7 @@
 | E2 数据库接入任务与前端轮询 | backend 目录 `./.venv/Scripts/python.exe -m pytest tests/test_ingest_jobs.py -q`，受限 PostgreSQL 测试库与独立子进程；前端 `./scripts/verify-local.ps1 frontend` 含 `frontend/tests/ingest.test.ts`、`source-import.test.tsx`；本地 Compose 启动后根目录 `python scripts/verify_ingest_local.py` | 检查 202/任务状态、幂等、空间隔离、队列并发、租约过期恢复、失败无修订、旧同步接口及长解析期间在线 API；Console 轮询与固定修订读取。正式环境 Worker 与资源负载仍需 E3/R1 补验 |
 | E3 同版本本地候选与负载 | 项目根 `./scripts/verify-local.ps1 all`；启动开发 Compose 后 `python scripts/verify_candidate_load.py`；backend 目录 `./.venv/Scripts/python.exe scripts/verify_ingest_upgrade.py`，使用全新 `INTENT_UPGRADE_TEST_DATABASE=intent_*_test`；完整步骤见 [INT-017 记录](records/INT-017-local-candidate.md) | 完整现有软件与生产构建、合成持续在途/固定到达/长历史/并行接入/限流；脚本会临时改开发空间限额并在 finally 恢复，保留审计修订。合成数值只作工程诊断 |
 | E3 故障、备份恢复与离线 | backend 目录 `./.venv/Scripts/python.exe scripts/verify_process_faults.py --run`；根目录 `./scripts/backup-local.ps1 -Label e3-candidate`、隔离库 `pg_restore --exit-on-error`；backend 目录 `./.venv/Scripts/python.exe scripts/verify_backup_restore.py --source intent --target <新隔离库>`，需本地 `INTENT_LOCAL_ADMIN_DATABASE_URL`；根目录 `./scripts/verify-offline-local.ps1 -RunName <新名称>` | 三实际进程故障窗口、全表逐值与 RLS 策略/受限身份恢复、无外网冷启动和双 Worker。归档与目标库保留，正式备份身份/RTO/RPO/真实硬件与业务仍待验证 |
+| 三层模拟 Demo 与双端日志 | backend 目录 `./.venv/Scripts/python.exe -m pytest -q tests/test_demo_catalog.py tests/test_demo_planning.py tests/test_model_profiles.py tests/test_trace_projection.py`，使用独立 `intent_test`；完整候选使用根目录 `./scripts/verify-local.ps1 all`。开发入口根目录 `./scripts/dev.ps1 up`，在 Console 安装模拟数据并访问应用链接，参见 [Demo 契约](../../backend/DEMO_CONTRACT.md) | 20项定义和处理器、五条规则链、模型桩回退、非法计划、确认/消歧/补参、对象权限、运行与管理投影、旧版本及两端构建；至少10个复合场景与浏览器、适用实际进程故障及迁移/恢复需同一候选登记。模拟数据和模型桩只算工程证据，真实模型与银行资源另测 |
 
 新增登记必须包括：名称、覆盖范围、实际命令或人工步骤的来源位置、执行目录、必要运行时/环境/数据、预期成功条件及报告位置。机器命令必须已从仓库查证；命令已登记不代表每个任务已执行。涉密环境仅保存安全引用，不登记密钥值。手工步骤可作为真实入口，但需足以由另一执行者重现。
 

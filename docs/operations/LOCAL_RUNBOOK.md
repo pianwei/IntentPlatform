@@ -25,6 +25,8 @@ python -m intent_platform.worker
 
 日常启动使用根目录 `./scripts/dev.ps1 up`，统一构建和运行两份前端。组件开发时可在 `frontend/` 使用各自Vite开发命令，属于开发内部工具而非交付入口；代理目标用 `INTENT_API_PROXY` 指向开发API。Windows和Linux的`node_modules`不能混用；当前机器使用Docker安装依赖，应继续在相同Node容器中构建和测试。
 
+Demo 的模型凭据由数据库 `pgcrypto` 加密。开发启动脚本先以本地数据库管理员在目标库安装扩展，再以受限 owner 运行迁移；已有 0006 库也走同一预备步骤。正式环境由数据库管理员在迁移前安装扩展，不提升应用或迁移账号权限。
+
 `npm run build` 生成正式模式前端，不提供开发身份及联调宿主。`npm run build:development` 显式生成本地演示版本。`infra/frontend.Dockerfile` 默认正式构建，只有本地 Compose 传入开发参数。制品在 `frontend/dist/console` 和 `frontend/dist/agent-web`。
 
 ## 身份、连接器与发布
@@ -49,6 +51,10 @@ python -m intent_platform.worker
 领域功能的新发布选择`router-v3`，向模型发送完整授权候选和去重领域投影；旧v1/v2会话保留原行为。有限影子评测接口默认关闭；需要时在测试API服务配置`INTENT_ALLOW_SHADOW_EVALUATION=true`，通过`backend/scripts/evaluate_shadow.py --help`查看独立CLI。Compose环境需用明确的环境覆盖文件注入，单独修改主机`.env`不自动替换Compose中的固定开发配置。接口要求运行会话所有者兼具有效publisher/admin角色，永久不派发业务；正常端到端评分另用`evaluate.py`，详见[影子契约](../../backend/ABLATION_CONTRACT.md)。
 
 ## 配置与发布聊天应用
+
+三层模拟 Demo 可在开发 Console“业务动作与 Skills”点击“安装或核对演示数据”，随后在“场景智能体”打开“三层意图演示助手”。默认一个智能体同时发布 20 项模拟功能和 5 个业务 Skill；独立聊天链接与 iframe 代码在该智能体“发布与嵌入”页。未配置模型时，页面标注为规则链工程预览，可用问题及行为见 [三层 Demo 契约](../../backend/DEMO_CONTRACT.md)。要验证无 Skill 的动态规划，在“模型配置”登记已获准的内网 OpenAI 兼容服务、明确版本和服务端凭据，先执行连接及结构化输出测试，再到智能体“任务策划”选择该配置、保存草稿并发布新版本。真实模型凭据不要写入命令、文档或功能包。
+
+开发模式新增 `INTENT_MODEL_SECRET_KEY` 用于模型配置的服务端加密；正式部署必须单独设置高强度秘密并安全保存，否则模型配置操作拒绝。停用模型配置会使引用它的旧发布明确不可用，不自动切换。Demo 状态在数据库按空间保存，重复安装不重置已创建工单或已冻结账户；需要新环境应使用新的隔离开发空间，不覆盖现有数据。
 
 在管理平台的智能体详情中配置统一模板。对话界面页填写名称、图标、简介、欢迎语、建议问题、主题色、输入提示和历史侧栏；访问控制页维护用户范围及精确宿主来源；发布与嵌入页选择功能、渠道并发布，复制该应用的Web链接、iframe代码与握手说明。
 

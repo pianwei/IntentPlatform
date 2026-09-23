@@ -64,7 +64,8 @@ def test_all_confirmation_actions_and_independent_failure(client, admin, monkeyp
     assert run["status"] == "WAITING_CONFIRMATION" and run["calls"] == []
     events = client.get(f"/api/v2/runtime/conversations/{cid}/events", headers=admin).json()
     confirmation = next(e["payload"] for e in events if e["event_type"] == "CONFIRMATION")
-    assert [x["capability_id"] for x in confirmation["actions"]] == ids
+    assert [x["name"] for x in confirmation["actions"]] == aliases
+    assert all("capability_id" not in x for x in confirmation["actions"])
     assert client.post(f"/api/v2/runtime/runs/{rid}/confirmations", headers=admin, json={"revision": run["revision"], "confirmed": True}).status_code == 200
     executed = []
     def connector(definition, *args, **kwargs):

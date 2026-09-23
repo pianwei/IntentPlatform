@@ -6,7 +6,7 @@ from .db import session
 from .models import Membership, WorkspaceGovernance, ProcessingAttempt, Run, Agent, Release
 from .auth import authenticate, manager, authorize, audit
 from .services import get_resource, owned_run, agent_view
-from .api_models import AgentOut
+from .api_models import AgentOut, RuntimeAttemptSummary
 from .trust import integration_catalog, trusted_members, member_ceiling, member_authority
 from .config import settings
 from .capacity import ceiling, effective_limits, usage, lock_workspace, attempt_view
@@ -97,7 +97,12 @@ def management_attempts(ws: str, run_id: str, token=Depends(authenticate), db: S
     return [attempt_view(row) for row in db.scalars(select(ProcessingAttempt).where(ProcessingAttempt.workspace_id == ws, ProcessingAttempt.run_id == run_id).order_by(ProcessingAttempt.started_at, ProcessingAttempt.id))]
 
 
-@router.get("/api/v2/runtime/runs/{run_id}/attempts", response_model=list[AttemptOut])
+@router.get("/api/v2/runtime/runs/{run_id}/attempts", response_model=list[RuntimeAttemptSummary])
 def runtime_attempts(run_id: str, token=Depends(authenticate), db: Session = Depends(session)):
     if token.scope != "runtime": raise HTTPException(403, "Scoped runtime session required")
-    return attempts(db, owned_run(db, run_id, token))
+    owned_run(db, run_id, token)
+    labels = {"routing": "理解请求", "execution": "执行功能", "reconciliation": "核对结果"}
+    rows = db.scalars(select(ProcessingAttempt).where(ProcessingAttempt.run_id == run_id).order_by(ProcessingAttempt.started_at))
+    return [{"stage": labels.get(row.kind, "处理请求"), "status": row.status,
+             "duration_ms": round(max(0.0, (row.finished_at - row.started_at).total_seconds() * 1000), 2)
+             if row.finished_at else None} for row in rows]

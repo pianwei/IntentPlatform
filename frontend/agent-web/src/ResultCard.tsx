@@ -20,10 +20,10 @@ export const statuses: Record<string, string> = {
   UNKNOWN: "结果未知，需核实",
   CANCELLED: "已取消",
 };
-export const questionKinds: Record<string, string> = { arguments: "补充业务参数", function_choice: "选择业务功能", entity_mention: "描述业务对象", entity_choice: "选择授权业务对象", history_choice: "选择历史结果对象" };
+export const questionKinds: Record<string, string> = { arguments: "补充业务参数", function_choice: "选择业务功能", entity_mention: "描述业务对象", entity_choice: "选择授权业务对象", history_choice: "选择历史结果对象", planner_arguments: "补充任务参数", planner_choice: "选择业务对象", planner_clarification: "澄清任务目标" };
 export function BindingSummary({ bindings }: { bindings: Run["bindings"] }) {
   if (!bindings?.length) return null;
-  return <details className="binding-summary"><summary>已采用的对象与上下文来源</summary>{bindings.map((binding, index) => <p key={index}><strong>{String(binding.role ?? "业务对象")}</strong> · 参数 {String(binding.parameter ?? "—")} · 来源 {binding.source === "history" ? "同会话历史结果" : binding.source === "resolver" ? "授权实体解析" : String(binding.source ?? "未提供")}<small className="block">解析器：{String(binding.resolver_ref ?? "未提供")}{binding.source_call_id ? ` · 来源调用：${String(binding.source_call_id)}` : ""}{binding.binding ? ` · 结果绑定：${String(binding.binding)}` : ""}{typeof binding.index === "number" ? ` · 原始结果位置：${binding.index}` : ""}</small></p>)}</details>;
+  return <details className="binding-summary"><summary>业务对象已确认</summary>{bindings.map((binding, index) => <p key={index}>{binding.source === "history" ? "同会话历史结果" : binding.source === "resolver" ? "已授权业务对象" : "业务对象已确认"}</p>)}</details>;
 }
 function valueText(value: unknown) {
   return value === null || value === undefined
@@ -31,6 +31,34 @@ function valueText(value: unknown) {
     : typeof value === "object"
       ? JSON.stringify(value)
       : String(value);
+}
+const businessLabels: Record<string, string> = {
+  customers: "客户", customer_id: "客户编号", name: "名称", city: "城市", masked_id: "证件标识",
+  accounts: "账户", account_id: "账户编号", label: "账户名称", currency: "币种",
+  balance: "余额", available: "可用余额", status: "状态", reason: "原因",
+  transactions: "交易", transaction_id: "交易编号", posted_on: "交易日期",
+  direction: "收支方向", amount: "金额", description: "说明",
+  income: "收入", expense: "支出", net: "净额", count: "笔数",
+  loans: "贷款合同", loan_id: "合同编号", product_name: "产品名称", outstanding: "剩余余额",
+  payments: "还款安排", due_on: "到期日", overdue: "逾期记录", days: "逾期天数",
+  products: "产品", product_id: "产品编号", category: "类别", holdings: "持仓",
+  holding_id: "持仓编号", units: "持有份额", tickets: "工单", ticket_id: "工单编号",
+  history: "处理记录", risk_level: "风险等级", as_of: "登记日期", segment: "客户分类",
+};
+function businessLabel(name: string) { return businessLabels[name] ?? name; }
+function duration(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(0)} ms` : "未记录";
+}
+export function RuntimeProcessingSummary({ run }: { run: Run | null }) {
+  if (!run || !run.steps?.length) return null;
+  const timing = run.timing;
+  return <details className="binding-summary"><summary>处理记录 · {run.steps.length} 步 · 总耗时 {duration(timing?.total_ms)}</summary>
+    <p className="muted small">处理 {duration(timing?.processing_ms)} · 等待补充或确认 {duration(timing?.user_wait_ms)}</p>
+    <ol>{run.steps.map((step, index) => <li key={`${index}-${step.name}`}><strong>{step.name}</strong> · {statuses[step.status] ?? step.status} · {duration(step.elapsed_ms)}
+      {Object.keys(step.input ?? {}).length > 0 && <details><summary>输入</summary><dl className="detail-grid">{Object.entries(step.input).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{valueText(value)}</dd></div>)}</dl></details>}
+      {step.output !== null && step.output !== undefined && <details><summary>输出</summary><pre>{valueText(step.output)}</pre></details>}
+    </li>)}</ol>
+  </details>;
 }
 export function canInteract(event: RuntimeEvent, run: Run | null) {
   return (
@@ -82,9 +110,6 @@ export function ResultCard({
     return (
       <Notice kind="error">
         {String(data.message ?? "请求未完成")}
-        {Boolean(data.trace_id) && (
-          <small className="block">追踪编号：{String(data.trace_id)}</small>
-        )}
       </Notice>
     );
   if (event.event_type === "QUESTION") {
@@ -210,7 +235,7 @@ export function ResultCard({
             (data.arguments as Record<string, unknown>) ?? {},
           ).map(([key, value]) => (
             <div key={key}>
-              <dt>{key}</dt>
+              <dt>{businessLabel(key)}</dt>
               <dd>{valueText(value)}</dd>
             </div>
           ))}
@@ -247,15 +272,16 @@ export function ResultCard({
   if (event.event_type !== "RESULT") return null;
   const result = data.data;
   const component = String(data.component ?? "detail");
-  const provenance = data.provenance as
-    | { capability_id?: string; version?: number }
-    | undefined;
+  const resultObject = result && typeof result === "object" && !Array.isArray(result)
+    ? result as Record<string, unknown> : null;
+  const namedRows = resultObject && Object.entries(resultObject).find(([, value]) =>
+    Array.isArray(value) && value.every(item => item !== null && typeof item === "object" && !Array.isArray(item)));
   const rows = Array.isArray(result)
     ? result
-    : typeof result === "object" &&
-        result !== null &&
-        Array.isArray((result as Record<string, unknown>).rows)
-      ? (result as { rows: unknown[] }).rows
+    : resultObject && Array.isArray(resultObject.rows)
+      ? resultObject.rows
+      : namedRows
+      ? namedRows[1] as unknown[]
       : null;
   const fields = Array.isArray(data.fields)
     ? (data.fields as { label: string; value: unknown }[])
@@ -286,7 +312,7 @@ export function ResultCard({
             <thead>
               <tr>
                 {columns.map((column) => (
-                  <th key={column}>{column}</th>
+                  <th key={column}>{businessLabel(column)}</th>
                 ))}
               </tr>
             </thead>
@@ -314,7 +340,7 @@ export function ResultCard({
         <dl className="detail-grid">
           {fields.map((field, index) => (
             <div key={`${field.label}-${index}`}>
-              <dt>{field.label}</dt>
+              <dt>{businessLabel(field.label)}</dt>
               <dd>{valueText(field.value)}</dd>
             </div>
           ))}
@@ -331,8 +357,7 @@ export function ResultCard({
         </div>
       )}
       <footer className="provenance">
-        来源：{provenance?.capability_id ?? "服务端未提供来源标识"}
-        {provenance?.version ? ` · v${provenance.version}` : ""}
+        已返回业务结果
         {Boolean(data.fixture_mode) && (
           <Badge tone="warning">开发夹具结果</Badge>
         )}

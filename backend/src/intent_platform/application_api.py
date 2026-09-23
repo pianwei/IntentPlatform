@@ -9,7 +9,7 @@ from .models import Agent, Function, Release, Asset, ResultFile, Conversation, R
 from .auth import authenticate, manager, audit
 from .schemas import AccessPolicy, Channels
 from .api_models import AgentOut, FunctionOut, PublicAppOut, TokenOut, SessionBody, ConversationOut, HistoryOut, AssetOut
-from .services import get_resource, agent_view, function_view, normalized_ui, conversation_view, owned_conversation, run_view
+from .services import get_resource, agent_view, function_view, normalized_ui, conversation_view, owned_conversation, run_view, authorize_fixture_result_access
 from .policies import effective_channels, permitted
 from .runtime_sessions import application, scoped_session, token_view
 from .origins import exact_origin
@@ -186,4 +186,5 @@ def download_file(file_id: str, token=Depends(authenticate), db: Session = Depen
     capability = db.get(Function, call.capability_id) if call else None
     if not capability or capability.disabled or not permitted(capability, token.user_id):
         raise HTTPException(403, "Originating capability is unavailable")
+    authorize_fixture_result_access(db, call, token.user_id)
     return binary_response(f.data, f.media_type, f.filename)

@@ -45,7 +45,7 @@ import type {
 import { Welcome, ApplicationIcon } from "../../shared/ApplicationView";
 import { readLocator, saveLocator } from "../../shared/application";
 import "./Application.css";
-import { BindingSummary, ResultCard, statuses } from "./ResultCard";
+import { ResultCard, RuntimeProcessingSummary, statuses } from "./ResultCard";
 
 type EventActions = {
   run: Run | null;
@@ -90,11 +90,6 @@ function ChatMessage() {
               </small>
             )}
           </div>
-        )}
-        {event && event.event_type !== "STATUS" && (
-          <details className="event-reference"><summary>查看处理记录</summary>
-            <small>请求 {event.run_id.slice(-8)} · 修订 {event.revision} · 事件 {event.sequence}</small>
-          </details>
         )}
       </div>
     </MessagePrimitive.Root>
@@ -555,7 +550,7 @@ export function AgentWorkspace({
                   </ThreadPrimitive.ScrollToBottom>
                 </ThreadPrimitive.Viewport>
                 <div className="composer-wrap">
-                  <BindingSummary bindings={run?.bindings} />
+                  <RuntimeProcessingSummary run={run} />
                   {run && (
                     <div className="conversation-status">
                       <span className="status-dot" />

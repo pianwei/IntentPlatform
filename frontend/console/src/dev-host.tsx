@@ -77,6 +77,8 @@ function DevelopmentHost() {
           if (active) setError(errorText(e));
         }
       } else if (data.instance_nonce === nonce.current) {
+        if (data.type === "AGENT_AUTHENTICATED")
+          setStatus("运行会话已建立，可开始对话");
         if (data.type === "AGENT_RESIZE" && Number.isFinite(data.height))
           setHeight(Math.min(1000, Math.max(480, data.height)));
         if (data.type === "AUTH_REQUIRED")

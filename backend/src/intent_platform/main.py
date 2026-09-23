@@ -16,7 +16,8 @@ from .models import (AuthToken, Workspace, Membership, Function, Agent, Release,
 from .schemas import ImportBody, DraftBody, ValidateBody, AgentBody, MessageBody, AnswerBody, ConfirmationBody, EmbedBody
 from .auth import authenticate, manager, authorize, bootstrap_identity, issue_token, workspaces, token_valid, audit
 from .services import (function_view, agent_view, release_view, get_resource, validate_function, publish_function, publish_agent,
-                       runtime_agent, visible_candidates, owned_conversation, owned_run, emit, status_event, event_view, run_view, normalized_ui, conversation_view)
+                       runtime_agent, visible_candidates, owned_conversation, owned_run, emit, status_event, event_view, run_view, normalized_ui, conversation_view,
+                       authorize_fixture_result_access)
 from .policies import permitted, dependency_error, effective_channels
 from .runtime_sessions import scoped_session, application, check_session_binding, token_view
 from .documents import extract_document
@@ -216,7 +217,7 @@ def edit_agent(ws: str, aid: str, body: AgentBody, token=Depends(authenticate), 
         from .trust import integration_catalog
         if set(body.integration_refs) - set(integration_catalog(ws)):
             raise HTTPException(422, "Select only server-approved integration references")
-    for key, value in body.model_dump(exclude={"revision", "allowed_users"}, exclude_unset=True, exclude_none=True).items():
+    for key, value in body.model_dump(exclude={"revision", "allowed_users"}, exclude_unset=True).items():
         setattr(a, key, value)
     a.revision += 1
     result = agent_view(a, db); db.commit(); return result
@@ -242,7 +243,7 @@ def rollback(ws: str, aid: str, body: RollbackBody, token=Depends(authenticate),
     r = get_resource(db, Release, body.release_id, ws)
     if r.agent_id != aid:
         raise HTTPException(409, "Release belongs to a different agent")
-    if error := dependency_error(r.snapshot):
+    if error := dependency_error(r.snapshot, db):
         raise HTTPException(409, error)
     a.current_release_id = r.id
     audit(db, token.user_id, ws, "agent.rollback", aid, {"release_id": r.id})
@@ -266,7 +267,7 @@ def evaluate(ws: str, body: EvaluationBody, token=Depends(authenticate), db: Ses
     if not cases or len(cases) > 1000:
         raise HTTPException(422, "Provide 1 to 1000 diagnostic cases")
     release = db.get(Release, a.current_release_id)
-    if error := dependency_error(release.snapshot):
+    if error := dependency_error(release.snapshot, db):
         raise HTTPException(409, error)
     candidates = visible_candidates(db, release, token)
     results = []
@@ -331,7 +332,7 @@ def new_conversation(aid: str, token=Depends(authenticate), db: Session = Depend
     bound = db.get(RuntimeSession, token.runtime_session_id) if token.runtime_session_id else None
     if not integration_allowed(a, r, token, bound.channel if bound else "chat", bound.host_origin if bound else None, bound.integration_id if bound else None):
         raise HTTPException(403, "Published identity integration unavailable")
-    if error := dependency_error(r.snapshot):
+    if error := dependency_error(r.snapshot, db):
         raise HTTPException(503, error)
     c = Conversation(workspace_id=a.workspace_id, agent_id=aid, release_id=a.current_release_id, user_id=token.user_id, token_id=token.id, runtime_session_id=token.runtime_session_id)
     db.add(c); db.flush(); result = conversation_view(db, c)
@@ -384,7 +385,38 @@ def answer(rid: str, body: AnswerBody, token=Depends(authenticate), db: Session 
     run = owned_run(db, rid, token, lock=True)
     if run.status != "WAITING_INPUT" or run.revision != body.revision or not run.question or run.question["id"] != body.question_id:
         raise HTTPException(409, "Question is stale")
-    if run.question.get("kind") in {"entity_mention", "entity_choice", "history_choice"}:
+    if run.question.get("kind") == "planner_clarification":
+        detail = body.values.get("detail")
+        if set(body.values) != {"detail"} or not isinstance(detail, str) or not detail.strip() or len(detail) > 2000:
+            raise HTTPException(422, "Provide a short clarification")
+        run.text += "\n补充说明：" + detail.strip()
+        run.proposal = {"planner_clarification_count": 1}
+    elif run.question.get("kind") in {"planner_arguments", "planner_choice"}:
+        from .models import ExecutionPlan, PlanStep
+        from .planning import trace
+        plan = db.scalar(select(ExecutionPlan).where(ExecutionPlan.run_id == run.id).with_for_update())
+        if not plan or plan.workspace_id != run.workspace_id:
+            raise HTTPException(409, "Planning state is unavailable")
+        if run.question["kind"] == "planner_arguments":
+            allowed = {field["name"] for field in run.question["fields"]}
+            if set(body.values) != allowed or any(not isinstance(value, str) or not value.strip() or len(value) > 500 for value in body.values.values()):
+                raise HTTPException(422, "Provide all requested planning inputs")
+            plan.inputs = {**plan.inputs, **body.values}
+            trace(db, run, "entity", "input_supplied", {"fields": sorted(body.values)})
+        else:
+            allowed = {option["id"] for option in run.question["options"]}
+            if body.option_id not in allowed:
+                raise HTTPException(422, "Select a current candidate")
+            step = db.scalar(select(PlanStep).where(PlanStep.plan_id == plan.id, PlanStep.step_key == run.question["step_key"]).with_for_update())
+            rows = (step.result or {}).get("data", {}).get("customers", []) if step else []
+            selected = [row for row in rows if row.get("customer_id") == body.option_id]
+            if len(selected) != 1:
+                raise HTTPException(409, "Candidate is unavailable")
+            step.result = {"data": {**step.result["data"], "customers": selected}}
+            plan.inputs = {**plan.inputs, "__chosen:" + step.step_key: body.option_id}
+            trace(db, run, "entity", "candidate_selected", {"step": step.step_key,
+                                                               "bound_object_type": "customer", "binding_source": "user_choice"})
+    elif run.question.get("kind") in {"entity_mention", "entity_choice", "history_choice"}:
         from .context_binding import apply_binding_answer
         try:
             apply_binding_answer(run, body)
@@ -453,6 +485,20 @@ def read_events(db, cid, token, after):
     owned_conversation(db, cid, token)
     batch = list(db.scalars(select(Event).where(Event.conversation_id == cid, Event.sequence > after).order_by(Event.sequence).limit(1000)))
     from .services import allowed_definition
+    from .models import ExecutionPlan, PlanStep
+    run_ids = {event.run_id for event in batch}
+    if run_ids:
+        # Every event of a plan, including its final text answer, inherits the
+        # current permission of every capability whose result contributed to it.
+        used = set(db.scalars(select(Call.capability_id).where(Call.run_id.in_(run_ids))))
+        used.update(db.scalars(select(PlanStep.capability_id).join(ExecutionPlan, ExecutionPlan.id == PlanStep.plan_id)
+                               .where(ExecutionPlan.run_id.in_(run_ids))))
+        for capability_id in used:
+            function = db.get(Function, capability_id)
+            if not function or function.disabled or not permitted(function, token.user_id):
+                raise HTTPException(403, "Result access was revoked")
+        for call in db.scalars(select(Call).where(Call.run_id.in_(run_ids))):
+            authorize_fixture_result_access(db, call, token.user_id)
     for event in batch:
         fid = event.payload.get("provenance", {}).get("capability_id") or event.payload.get("capability_id")
         ids = ([fid] if fid else []) + [a["capability_id"] for a in event.payload.get("actions", [])]
@@ -464,6 +510,10 @@ def read_events(db, cid, token, after):
                 authorize_question(db, db.get(Run, event.run_id), event.payload["question_id"])
             except (ValueError, PermissionError):
                 raise HTTPException(403, "Question entity or source access was revoked")
+        elif event.event_type == "QUESTION" and event.payload.get("kind") == "planner_choice":
+            if not db.scalar(select(PlanStep.id).join(ExecutionPlan, ExecutionPlan.id == PlanStep.plan_id)
+                             .where(ExecutionPlan.run_id == event.run_id)):
+                raise HTTPException(403, "Question source is unavailable")
         for fid in ids:
             f = db.get(Function, fid)
             if not f or f.disabled or not permitted(f, token.user_id):
@@ -635,3 +685,11 @@ from .governance_api import router as governance_router
 app.include_router(governance_router)
 from .shadow_api import router as shadow_router
 app.include_router(shadow_router)
+from .planning_api import router as planning_router
+app.include_router(planning_router)
+from .model_profiles_api import router as model_profiles_router
+app.include_router(model_profiles_router)
+from .demo_api import router as demo_router
+app.include_router(demo_router)
+from .trace_api import router as trace_router
+app.include_router(trace_router)

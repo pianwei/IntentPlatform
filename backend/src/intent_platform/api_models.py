@@ -110,6 +110,9 @@ class AgentOut(StrictModel):
     integration_refs: list[str]
     published_integration_refs: list[str] | None
     revoked_integration_refs: list[str]
+    planning_enabled: bool = False
+    business_skill_ids: list[str] = Field(default_factory=list)
+    model_profile_id: str | None = None
 
 
 class RuntimeAgentSummaryOut(StrictModel):
@@ -195,16 +198,33 @@ class QuestionOut(StrictModel):
     fields: list[QuestionField]
     options: list[OptionOut]
     request_index: int | None = None
-    kind: Literal["arguments", "function_choice", "entity_mention", "entity_choice", "history_choice"] = "arguments"
+    kind: Literal["arguments", "function_choice", "entity_mention", "entity_choice", "history_choice", "planner_arguments", "planner_choice", "planner_clarification"] = "arguments"
     binding_key: str | None = None
 
 
 class CallOut(StrictModel):
     id: str
-    action_id: str
-    capability_id: str
     status: Literal["PENDING", "EXECUTING", "RECONCILING", "SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"]
-    operation_id: str | None
+
+
+class RuntimeStepSummary(StrictModel):
+    name: str
+    status: str
+    input: dict[str, Any]
+    output: Any | None
+    elapsed_ms: float | None
+
+
+class RuntimeTimingSummary(StrictModel):
+    total_ms: float | None
+    user_wait_ms: float | None
+    processing_ms: float | None
+
+
+class RuntimeAttemptSummary(StrictModel):
+    stage: str
+    status: str
+    duration_ms: float | None
 
 
 class RunOut(StrictModel):
@@ -217,6 +237,8 @@ class RunOut(StrictModel):
     calls: list[CallOut]
     fixture_mode: bool
     bindings: list[dict[str, Any]] = Field(default_factory=list)
+    steps: list[RuntimeStepSummary] = Field(default_factory=list)
+    timing: RuntimeTimingSummary
 
 
 class EventOut(StrictModel):

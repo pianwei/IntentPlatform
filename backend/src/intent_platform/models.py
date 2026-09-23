@@ -85,6 +85,9 @@ class Agent(Base):
     live_channels: Mapped[dict] = mapped_column(JSONB, default=lambda: {"chat": True, "embed": True})
     integration_refs: Mapped[list] = mapped_column(JSONB, default=lambda: ["development"] if settings().allow_dev_auth and settings().env != "production" else [])
     revoked_integration_refs: Mapped[list] = mapped_column(JSONB, default=list)
+    planning_enabled: Mapped[bool] = mapped_column(default=False)
+    business_skill_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    model_profile_id: Mapped[str | None] = mapped_column(ForeignKey("model_profiles.id"))
 
 
 class Release(Base):
@@ -95,6 +98,73 @@ class Release(Base):
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"))
     version: Mapped[int]
     snapshot: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ActionDefinition(Base):
+    __tablename__ = "action_definitions"
+    __table_args__ = (UniqueConstraint("workspace_id", "key"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("action"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    key: Mapped[str]
+    definition: Mapped[dict] = mapped_column(JSONB)
+    revision: Mapped[int] = mapped_column(default=1)
+    latest_version: Mapped[int] = mapped_column(default=0)
+
+
+class ActionDefinitionVersion(Base):
+    __tablename__ = "action_definition_versions"
+    __table_args__ = (UniqueConstraint("action_id", "version"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("action_version"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    action_id: Mapped[str] = mapped_column(ForeignKey("action_definitions.id"))
+    version: Mapped[int]
+    definition: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BusinessSkill(Base):
+    __tablename__ = "business_skills"
+    __table_args__ = (UniqueConstraint("workspace_id", "key"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("skill"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    key: Mapped[str]
+    definition: Mapped[dict] = mapped_column(JSONB)
+    revision: Mapped[int] = mapped_column(default=1)
+    latest_version: Mapped[int] = mapped_column(default=0)
+    disabled: Mapped[bool] = mapped_column(default=False)
+
+
+class BusinessSkillVersion(Base):
+    __tablename__ = "business_skill_versions"
+    __table_args__ = (UniqueConstraint("skill_id", "version"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("skill_version"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    skill_id: Mapped[str] = mapped_column(ForeignKey("business_skills.id"))
+    version: Mapped[int]
+    definition: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ModelProfile(Base):
+    __tablename__ = "model_profiles"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("model"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    name: Mapped[str]
+    revision: Mapped[int] = mapped_column(default=1)
+    latest_version: Mapped[int] = mapped_column(default=0)
+    disabled: Mapped[bool] = mapped_column(default=False)
+
+
+class ModelProfileVersion(Base):
+    __tablename__ = "model_profile_versions"
+    __table_args__ = (UniqueConstraint("profile_id", "version"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("model_version"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    profile_id: Mapped[str] = mapped_column(ForeignKey("model_profiles.id"))
+    version: Mapped[int]
+    config: Mapped[dict] = mapped_column(JSONB)
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -136,6 +206,7 @@ class Run(Base):
     bindings: Mapped[dict] = mapped_column(JSONB, default=dict)
     validation_evidence: Mapped[dict | None] = mapped_column(JSONB)
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Call(Base):
@@ -156,6 +227,59 @@ class Call(Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     bindings: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class ExecutionPlan(Base):
+    __tablename__ = "execution_plans"
+    __table_args__ = (UniqueConstraint("run_id"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("plan"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    release_id: Mapped[str] = mapped_column(ForeignKey("agent_releases.id"))
+    source: Mapped[str]
+    skill_version_id: Mapped[str | None] = mapped_column(ForeignKey("business_skill_versions.id"))
+    status: Mapped[str] = mapped_column(default="PENDING")
+    inputs: Mapped[dict] = mapped_column(JSONB, default=dict)
+    snapshot: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PlanStep(Base):
+    __tablename__ = "plan_steps"
+    __table_args__ = (UniqueConstraint("plan_id", "step_key"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("step"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("execution_plans.id"))
+    step_key: Mapped[str]
+    capability_id: Mapped[str] = mapped_column(ForeignKey("functions.id"))
+    version: Mapped[int]
+    definition: Mapped[dict] = mapped_column(JSONB)
+    spec: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(default="PENDING")
+    arguments: Mapped[dict | None] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    call_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ManagementTrace(Base):
+    __tablename__ = "management_traces"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("trace"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    layer: Mapped[str]
+    kind: Mapped[str]
+    detail: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class DemoState(Base):
+    __tablename__ = "demo_states"
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), primary_key=True)
+    state: Mapped[dict] = mapped_column(JSONB)
+    revision: Mapped[int] = mapped_column(default=1)
 
 
 class Event(Base):

@@ -5,6 +5,7 @@
 ## 输入与前置条件
 
 - 由目标环境提供已经审查的后端和正式模式 Web 镜像标识、受限 PostgreSQL app 角色及独立迁移 owner 角色。此 Compose 不创建数据库、不设置数据库口令，也不构建开发镜像。
+- 数据库管理员须在目标数据库预先安装 `pgcrypto` 扩展，并确认迁移账号可调用 `pgp_sym_encrypt`/`pgp_sym_decrypt`；0007 迁移会检查扩展存在，不授予迁移账号数据库 CREATE 权限。密钥仍仅由应用服务端配置持有。
 - 通过获准秘密管理渠道提供 `.env.production` 等只在目标环境存在的配置文件；它被 Git 忽略。`.env.production.example` 只列字段，不包含实际地址或口令。不要把填好值的文件、容器配置输出、票据、原始日志或数据库归档纳入源码基线。
 - `INTENT_ALLOWED_HOSTS` 是模型、身份、对象授权和业务连接器的**出站目标**白名单，所有必需服务端点的主机必须在内；它不是浏览器传入 Host 的白名单。批准的 TLS 入口须单独限制外部 Host、提供证书和转发 `/console/`、`/chat/`、`/embed/` 与 `/api/`。
 - `INTENT_CORS_ORIGINS` 使用精确 HTTPS 浏览器来源；可信 iframe 宿主还须经应用发布策略、身份委托、一次性票据和动态 CSP 检查。管理页仍不得嵌入。

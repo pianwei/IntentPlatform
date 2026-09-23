@@ -49,6 +49,9 @@ import type {
 } from "../../shared/types";
 import { DEVELOPMENT_UI } from "../../shared/environment";
 import { EvaluationPage } from "./EvaluationPage";
+import { BusinessPlanningPage } from "./BusinessPlanningPage";
+import { ModelSettingsPage } from "./ModelSettingsPage";
+import { RunTracePage } from "./RunTracePage";
 
 const statusLabels: Record<string, string> = {
   draft: "待完善",
@@ -56,7 +59,7 @@ const statusLabels: Record<string, string> = {
   published: "已发布",
   disabled: "已停用",
 };
-type Page = "functions" | "documents" | "domains" | "agents" | "evaluations" | "audit" | "readiness" | "governance";
+type Page = "functions" | "documents" | "domains" | "planning" | "models" | "runs" | "agents" | "evaluations" | "audit" | "readiness" | "governance";
 
 export function ConsoleApp() {
   const [identity, setIdentity] = useState<Identity | null>(null);
@@ -223,6 +226,9 @@ export function ConsoleWorkspace({
   const titles: Record<Page, string> = {
     functions: "功能目录",
     domains: "领域管理",
+    planning: "业务动作与 Skills",
+    models: "模型配置",
+    runs: "运行日志",
     documents: "来源文档",
     agents: "场景智能体",
     evaluations: "评测诊断",
@@ -261,6 +267,9 @@ export function ConsoleWorkspace({
             [
               { key: "functions", icon: Blocks, label: "功能目录" },
               { key: "domains", icon: LayoutGrid, label: "领域管理" },
+              { key: "planning", icon: Blocks, label: "业务动作与 Skills" },
+              { key: "models", icon: Settings2, label: "模型配置" },
+              { key: "runs", icon: Activity, label: "运行日志" },
               { key: "documents", icon: FileText, label: "来源文档" },
               { key: "agents", icon: Sparkles, label: "场景智能体" },
               { key: "evaluations", icon: FlaskConical, label: "评测诊断" },
@@ -321,6 +330,12 @@ export function ConsoleWorkspace({
                     ? "维护领域概念、关系和单位，发布可供功能精确绑定的不可变版本。"
                     : page === "documents"
                       ? "保留接口与业务资料的原文修订、章节和原始文件，追溯每一条引用。"
+                    : page === "planning"
+                      ? "将实体、动作和有限业务规则组合为可验证的任务链。"
+                    : page === "models"
+                      ? "配置获准模型地址与明确版本，测试连接及结构化输出。"
+                    : page === "runs"
+                      ? "按三层决策与业务步骤查看结构化运行事实。"
                   : page === "agents"
                     ? "组合已发布的业务功能，形成可独立运行和嵌入的智能体。"
                     : page === "evaluations"
@@ -350,6 +365,9 @@ export function ConsoleWorkspace({
           {success && <Notice kind="success">{success}</Notice>}
           {page === "documents" && workspace && <DocumentLibrary key={workspace} api={api} workspace={workspace} writable={canManage} />}
           {page === "domains" && workspace && <DomainPage key={workspace} api={api} workspace={workspace} writable={canManage} publishable={!!activeSpace?.roles.some(r => ["admin", "publisher"].includes(r))} />}
+          {page === "planning" && workspace && <BusinessPlanningPage key={workspace} api={api} workspace={workspace} writable={canManage} publishable={!!activeSpace?.roles.some(r => ["admin", "publisher"].includes(r))} admin={!!activeSpace?.roles.includes("admin")} development={DEVELOPMENT_UI} onSeeded={reload} />}
+          {page === "models" && workspace && <ModelSettingsPage key={workspace} api={api} workspace={workspace} admin={!!activeSpace?.roles.includes("admin")} />}
+          {page === "runs" && workspace && <RunTracePage key={workspace} api={api} workspace={workspace} admin={!!activeSpace?.roles.includes("admin")} />}
           {page === "governance" && workspace && <GovernancePage key={workspace} api={api} workspace={workspace} userId={identity.user_id} admin={!!activeSpace?.roles.includes("admin")} canManage={canManage} />}
           {page === "functions" && (
             <>

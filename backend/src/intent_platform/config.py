@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     model_name: str = "development-deterministic-v1"
     model_version: str | None = None
     model_api_key: str = ""
+    model_secret_key: str = ""
     model_timeout: float = 30
     allowed_hosts: str = "localhost,127.0.0.1"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

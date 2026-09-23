@@ -98,6 +98,9 @@ export type Agent = {
   revoked_integration_refs?: string[];
   suggested_questions: string[];
   fixture_mode: boolean;
+  planning_enabled?: boolean;
+  business_skill_ids?: string[];
+  model_profile_id?: string | null;
   capabilities?: { id: string; name: string; description: string }[];
 };
 export type RuntimeStatus =
@@ -119,6 +122,23 @@ export type RuntimeEvent = {
   event_type: "STATUS" | "QUESTION" | "CONFIRMATION" | "RESULT" | "ERROR";
   payload: Record<string, unknown>;
 };
+export type RuntimeStepSummary = {
+  name: string;
+  status: string;
+  input: Record<string, unknown>;
+  output: unknown | null;
+  elapsed_ms: number | null;
+};
+export type RuntimeTimingSummary = {
+  total_ms: number | null;
+  user_wait_ms: number | null;
+  processing_ms: number | null;
+};
+export type RuntimeAttemptSummary = {
+  stage: string;
+  status: string;
+  duration_ms: number | null;
+};
 export type Run = {
   run_id: string;
   conversation_id: string;
@@ -127,7 +147,9 @@ export type Run = {
   decision?: string;
   question?: { id: string; kind?: string; fields?: Field[]; options?: Choice[] } | null;
   bindings?: Record<string, unknown>[];
-  calls?: { id: string; capability_id: string; status: string }[];
+  calls?: { id: string; status: string }[];
+  steps?: RuntimeStepSummary[];
+  timing?: RuntimeTimingSummary;
   fixture_mode?: boolean;
 };
 export type Field = {

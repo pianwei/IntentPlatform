@@ -37,7 +37,7 @@ def scoped_session(db, parent, agent, channel, session_id=None, origin=None, non
     release = db.get(Release, agent.current_release_id) if agent.current_release_id else None
     if not permitted(agent, parent.user_id) or not release or not effective_channels(agent, release).get(channel):
         raise HTTPException(403, "Application channel or authorization unavailable")
-    error = dependency_error(release.snapshot)
+    error = dependency_error(release.snapshot, db)
     if error:
         raise HTTPException(503, error)
     if channel == "embed" and (origin not in release.snapshot["allowed_origins"] or origin in agent.revoked_origins):

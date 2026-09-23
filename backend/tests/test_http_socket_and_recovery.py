@@ -149,7 +149,7 @@ def test_invalid_confirmed_write_output_keeps_success_without_replay(client, adm
     assert run["status"] == "SUCCEEDED" and run["calls"][0]["status"] == "SUCCEEDED"
     assert len(sends) == 1 and state["writes"] == baseline
     result = next(e["payload"] for e in events if e["event_type"] == "RESULT")
-    assert result["result_unavailable"] is True and result["data"] == {}
+    assert result["result_unavailable"] is True and result["data"] is None
     assert any(e["event_type"] == "ERROR" and e["payload"]["code"] == "RESULT_UNAVAILABLE" for e in events)
     assert "write-response-marker" not in str(events)
     with Session(engine) as db:

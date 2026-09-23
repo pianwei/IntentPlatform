@@ -111,11 +111,16 @@ class AgentBody(StrictModel):
     runtime_ui: "RuntimeUI | None" = None
     channels: "Channels | None" = None
     integration_refs: list[str] | None = Field(default=None, max_length=32)
+    planning_enabled: bool = False
+    business_skill_ids: list[str] = Field(default_factory=list, max_length=32)
+    model_profile_id: str | None = None
 
     @model_validator(mode="after")
     def origins(self):
         if len(set(self.capability_ids)) != len(self.capability_ids):
             raise ValueError("Duplicate capability IDs")
+        if len(set(self.business_skill_ids)) != len(self.business_skill_ids):
+            raise ValueError("Duplicate business Skill IDs")
         if self.integration_refs is not None and (len(self.integration_refs) != len(set(self.integration_refs)) or any(not ref.strip() for ref in self.integration_refs)):
             raise ValueError("Integration references must be distinct nonempty IDs")
         for origin in self.allowed_origins:

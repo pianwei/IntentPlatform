@@ -1,8 +1,9 @@
 from datetime import timedelta
+import math
 from fastapi import HTTPException
 from sqlalchemy import select, func
 from .db import now, uid
-from .models import Function, FunctionVersion, Agent, Release, Conversation, Run, Call, Event
+from .models import Function, FunctionVersion, Agent, Release, Conversation, Run, Call, Event, BusinessSkill, BusinessSkillVersion, ModelProfile, ModelProfileVersion
 from .config import settings
 from .auth import authorize, manager, token_valid, audit
 from .schemas import Definition, RuntimeUI
@@ -37,6 +38,8 @@ def agent_view(a, db=None):
             "published_origins": published.snapshot.get("allowed_origins", []) if published else [], "revoked_origins": a.revoked_origins,
             "integration_refs": a.integration_refs, "published_integration_refs": list(published.snapshot["identity_policy"]["profiles"]) if published and published.snapshot.get("identity_policy") else None,
             "revoked_integration_refs": a.revoked_integration_refs,
+            "planning_enabled": a.planning_enabled, "business_skill_ids": a.business_skill_ids,
+            "model_profile_id": a.model_profile_id,
             "access": {"access_mode": a.access_mode, "allowed_users": a.allowed_users}}
 
 
@@ -256,7 +259,59 @@ def publish_agent(db, agent, token, expected_revision=None):
             model_body("", capabilities, [])
         except ValueError as exc:
             raise HTTPException(409, str(exc))
-    error = dependency_error(snapshot)
+    if agent.planning_enabled:
+        from .models import ActionDefinition, ActionDefinitionVersion
+        from .planning import _skill_spec, validate_plan
+        snapshot["dependency_profile"] = "platform-v4"
+        snapshot["prompt_policy_version"] = "planner-v1"
+        snapshot["planning_policy"] = {"version": "finite-plan-v1", "max_steps": 8,
+                                       "max_batch": 5, "max_calls": 20, "max_parallel": 3}
+        candidate_by_key = {c["definition"]["connector"].get("workflow_id"): c for c in capabilities
+                            if c["definition"]["connector"].get("workflow_id")}
+        published_skills = []
+        for skill_id in agent.business_skill_ids:
+            skill = get_resource(db, BusinessSkill, skill_id, agent.workspace_id)
+            if skill.disabled or not skill.latest_version:
+                raise HTTPException(409, "Every selected business Skill must be published and enabled")
+            version = db.scalar(select(BusinessSkillVersion).where(BusinessSkillVersion.skill_id == skill.id,
+                                                                   BusinessSkillVersion.version == skill.latest_version))
+            if not version:
+                raise HTTPException(409, "Pinned business Skill version is unavailable")
+            try:
+                spec = _skill_spec(version.definition, {}, candidate_by_key)
+                validate_plan(spec, capabilities, "")
+            except ValueError as exc:
+                raise HTTPException(409, "Business Skill is incompatible with this agent: " + str(exc)) from None
+            published_skills.append({"skill_id": skill.id, "version_id": version.id,
+                                     "version": version.version, "definition": version.definition})
+        snapshot["business_skills"] = published_skills
+        action_keys = {c["definition"]["action"] for c in capabilities}
+        action_versions = []
+        for key in sorted(action_keys):
+            action = db.scalar(select(ActionDefinition).where(ActionDefinition.workspace_id == agent.workspace_id,
+                                                               ActionDefinition.key == key))
+            if not action or not action.latest_version:
+                raise HTTPException(409, "Publish the selected capabilities' action definitions first")
+            version = db.scalar(select(ActionDefinitionVersion).where(ActionDefinitionVersion.action_id == action.id,
+                                                                       ActionDefinitionVersion.version == action.latest_version))
+            action_versions.append({"action_id": action.id, "version_id": version.id, "version": version.version,
+                                    "definition": version.definition})
+        snapshot["action_definitions"] = action_versions
+        if agent.model_profile_id:
+            profile = get_resource(db, ModelProfile, agent.model_profile_id, agent.workspace_id)
+            if profile.disabled or not profile.latest_version:
+                raise HTTPException(409, "Selected model profile is unavailable")
+            version = db.scalar(select(ModelProfileVersion).where(ModelProfileVersion.profile_id == profile.id,
+                                                                  ModelProfileVersion.version == profile.latest_version))
+            if not version or not version.secret_ciphertext:
+                raise HTTPException(409, "Selected model version has no server credential")
+            from .model_profiles import pinned_snapshot
+            snapshot["model_profile"] = pinned_snapshot(profile, version)
+        elif cfg.env == "production":
+            raise HTTPException(409, "Planner publication requires a configured immutable model profile")
+        if snapshot["model_profile"]["mode"] == "fixture":
+            snapshot["fixture_mode"] = True
+    error = dependency_error(snapshot, db)
     if error:
         raise HTTPException(409, error)
     if not agent.current_release_id:
@@ -326,13 +381,253 @@ def emit(db, run, event_type, payload):
     return event
 
 
+_PRIVATE_NAMES = ("password", "secret", "token", "credential", "api_key", "authorization")
+
+
+def _display_value(value, name="", depth=0):
+    """Bound untrusted historical event values before returning them to a user."""
+    if any(marker in name.lower() for marker in _PRIVATE_NAMES):
+        return "已隐藏"
+    if isinstance(value, str):
+        return value[:16000]
+    if isinstance(value, float) and not math.isfinite(value):
+        return "已省略"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if depth >= 3:
+        return "已省略"
+    if isinstance(value, list):
+        return [_display_value(item, depth=depth + 1) for item in value[:100]]
+    if isinstance(value, dict):
+        return {key: _display_value(item, key, depth + 1) for key, item in list(value.items())[:40]
+                if isinstance(key, str) and len(key) <= 64}
+    return "已省略"
+
+
+def _approved_data(definition, value):
+    if not isinstance(value, dict):
+        return None
+    if definition.get("output_schema"):
+        from .output_contract import project_output, OutputContractError
+        try:
+            return _display_value(project_output(definition, value)[0])
+        except (ValueError, OutputContractError):
+            return None
+    # Pinned versions predating finite output contracts have only their explicit
+    # presentation field map as an approval boundary.
+    fields = (definition.get("presentation") or {}).get("field_map") or {}
+    if fields:
+        return _display_value({field: value[field] for field in fields.values() if field in value})
+    # The original development-only fixture predates output mapping. Its
+    # synthetic data remains usable, but it can never become a production path.
+    if definition.get("connector", {}).get("kind") == "fixture" and settings().env != "production":
+        return _display_value(value)
+    return None
+
+
+def _runtime_question(question):
+    if not question:
+        return None
+    return {"id": question["id"], "kind": question.get("kind", "arguments"),
+            "fields": [{key: field[key] for key in ("name", "type", "required", "label", "unit") if key in field}
+                       for field in (question.get("fields") or []) if isinstance(field, dict)],
+            "options": [{"id": option["id"], "label": str(option["label"])[:160]}
+                        for option in (question.get("options") or []) if isinstance(option, dict)
+                        and "id" in option and "label" in option]}
+
+
+def _runtime_steps(db, run):
+    from .models import ExecutionPlan, PlanStep, ProcessingAttempt
+    plan = db.scalar(select(ExecutionPlan).where(ExecutionPlan.run_id == run.id))
+    steps = []
+    if plan:
+        ordered = {item["step_id"]: index for index, item in enumerate(plan.snapshot.get("steps", []))}
+        rows = list(db.scalars(select(PlanStep).where(PlanStep.plan_id == plan.id)))
+        for step in sorted(rows, key=lambda row: ordered.get(row.step_key, 1000)):
+            values = (step.arguments or {}).get("items", [])
+            if not isinstance(values, list):
+                values = []
+            values = [item for item in values if isinstance(item, dict)]
+            approved_input = {key: _display_value(value, key) for key, value in values[0].items()
+                              if key in step.definition["input_schema"].get("properties", {})} if len(values) == 1 else {
+                "items": [{key: _display_value(value, key) for key, value in item.items()
+                           if key in step.definition["input_schema"].get("properties", {})} for item in values[:5]]}
+            raw = (step.result or {}).get("data")
+            if isinstance(raw, list):
+                approved_output = [_approved_data(step.definition, item) for item in raw[:5]]
+            else:
+                approved_output = _approved_data(step.definition, raw)
+            duration = (round((step.finished_at - step.started_at).total_seconds() * 1000, 2)
+                        if step.started_at and step.finished_at else None)
+            steps.append({"name": step.definition["name"], "status": step.status,
+                          "input": approved_input, "output": approved_output, "elapsed_ms": duration})
+        return steps
+    calls = list(db.scalars(select(Call).where(Call.run_id == run.id).order_by(Call.id)))
+    for call in calls:
+        attempts = list(db.scalars(select(ProcessingAttempt).where(ProcessingAttempt.run_id == run.id,
+                                                              ProcessingAttempt.call_id == call.id)
+                                   .order_by(ProcessingAttempt.started_at)))
+        started = next((a.started_at for a in attempts if a.started_at), None)
+        finished = next((a.finished_at for a in reversed(attempts) if a.finished_at), None)
+        steps.append({"name": call.definition["name"], "status": call.status,
+                      "input": {key: _display_value(value, key) for key, value in call.arguments.items()
+                                if key in call.definition["input_schema"].get("properties", {})},
+                      "output": _approved_data(call.definition, (call.result or {}).get("data")),
+                      "elapsed_ms": round((finished - started).total_seconds() * 1000, 2) if started and finished else None})
+    return steps
+
+
+def _runtime_timing(db, run):
+    stamps = list(db.scalars(select(Event).where(Event.run_id == run.id, Event.event_type == "STATUS")
+                             .order_by(Event.sequence)))
+    waiting_start = None
+    waiting_ms = 0.0
+    for event in stamps:
+        status = event.payload.get("status")
+        if status in {"WAITING_INPUT", "WAITING_CONFIRMATION"} and waiting_start is None:
+            waiting_start = event.created_at
+        elif status not in {"WAITING_INPUT", "WAITING_CONFIRMATION"} and waiting_start is not None:
+            waiting_ms += max(0.0, (event.created_at - waiting_start).total_seconds() * 1000)
+            waiting_start = None
+    if waiting_start is not None and run.finished_at:
+        waiting_ms += max(0.0, (run.finished_at - waiting_start).total_seconds() * 1000)
+    total = round(max(0.0, (run.finished_at - run.created_at).total_seconds() * 1000), 2) if run.finished_at else None
+    observed_wait = round(waiting_ms, 2) if stamps and waiting_start is None else None
+    return {"total_ms": total, "user_wait_ms": observed_wait,
+            "processing_ms": round(max(0.0, total - observed_wait), 2) if total is not None and observed_wait is not None else None}
+
+
+def authorize_fixture_result_access(db, call, user_id):
+    """Recheck current synthetic object grants before restoring fixture-v2 data.
+
+    This is deliberately limited to the new demo connector. Older published
+    fixtures and resolver-backed functions retain their pinned read behavior.
+    """
+    connector = call.definition.get("connector", {})
+    if connector.get("kind") != "fixture" or connector.get("version") != "2" or not call.result:
+        return
+    from .models import DemoState
+    from .demo.engine import authorize_operation, authorized_customers
+
+    state = db.get(DemoState, call.workspace_id)
+    if not state:
+        raise HTTPException(403, "Business object access is unavailable")
+    try:
+        authorize_operation(connector["workflow_id"], call.arguments, state.state, user_id)
+        if connector["workflow_id"] == "demo.customer.search":
+            allowed = authorized_customers(user_id, state.state)
+            data = (call.result or {}).get("data") or {}
+            rows = data.get("customers", []) if isinstance(data, dict) else []
+            if any(not isinstance(row, dict) or row.get("customer_id") not in allowed for row in rows):
+                raise PermissionError("Synthetic search result access changed")
+    except (KeyError, TypeError, ValueError, PermissionError):
+        raise HTTPException(403, "Business object access was revoked") from None
+
+
+def authorize_run_capabilities(db, run):
+    """Recheck current function grants before any run result is projected."""
+    from .models import ExecutionPlan, PlanStep
+    calls = list(db.scalars(select(Call).where(Call.run_id == run.id)))
+    capability_ids = {call.capability_id for call in calls}
+    plan = db.scalar(select(ExecutionPlan).where(ExecutionPlan.run_id == run.id))
+    if plan:
+        capability_ids.update(db.scalars(select(PlanStep.capability_id).where(PlanStep.plan_id == plan.id)))
+    for capability_id in capability_ids:
+        function = db.get(Function, capability_id)
+        if not function or function.disabled or not permitted(function, run.user_id):
+            raise HTTPException(403, "Result access was revoked")
+    for call in calls:
+        authorize_fixture_result_access(db, call, run.user_id)
+
+
 def event_view(e):
+    """The same allowlist is applied to polling, SSE and restored history."""
+    from sqlalchemy.orm import object_session
+    payload = e.payload or {}
+    if e.event_type == "STATUS":
+        public = {"status": payload.get("status"), "fixture_mode": bool(payload.get("fixture_mode", False))}
+    elif e.event_type == "QUESTION":
+        public = {"question_id": payload.get("question_id"), "kind": payload.get("kind", "arguments"),
+                  "fields": _runtime_question({"id": payload.get("question_id"), "fields": payload.get("fields", [])})["fields"],
+                  "options": _runtime_question({"id": payload.get("question_id"), "options": payload.get("options", [])})["options"],
+                  "message": str(payload.get("message", "请补充信息"))[:240],
+                  "errors": [str(item)[:160] for item in payload.get("errors", [])[:8]] if isinstance(payload.get("errors"), list) else []}
+    elif e.event_type == "CONFIRMATION":
+        from sqlalchemy.orm import object_session
+        from .models import ExecutionPlan, PlanStep
+        db = object_session(e)
+        approved_actions = []
+        source_actions = payload.get("actions")
+        if isinstance(source_actions, list) and db:
+            for item in source_actions[:8]:
+                if not isinstance(item, dict):
+                    continue
+                version = db.scalar(select(FunctionVersion).where(FunctionVersion.function_id == item.get("capability_id"),
+                                                                     FunctionVersion.version == item.get("version")))
+                if not version:
+                    continue
+                permitted_fields = (version.definition.get("input_schema") or {}).get("properties", {})
+                arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+                approved_actions.append({"name": str(version.definition.get("name", "业务操作"))[:160],
+                                         "arguments": {key: _display_value(value, key) for key, value in arguments.items()
+                                                       if key in permitted_fields}})
+        elif db:
+            plan = db.scalar(select(ExecutionPlan).where(ExecutionPlan.run_id == e.run_id))
+            step = (db.scalar(select(PlanStep).where(PlanStep.plan_id == plan.id,
+                                                     PlanStep.definition["effect"].as_string() == "WRITE")) if plan else None)
+            if step:
+                permitted_fields = (step.definition.get("input_schema") or {}).get("properties", {})
+                arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+                approved_actions.append({"name": str(step.definition.get("name", "业务操作"))[:160],
+                                         "arguments": {key: _display_value(value, key) for key, value in arguments.items()
+                                                       if key in permitted_fields}})
+        public = {"name": str(payload.get("name", "业务操作"))[:160],
+                  "arguments": (approved_actions[0]["arguments"] if len(approved_actions) == 1 else
+                                {"业务操作": approved_actions} if approved_actions else {}),
+                  "actions": approved_actions,
+                  "expires_at": payload.get("expires_at"), "message": "确认后将执行所示业务操作"}
+    elif e.event_type == "RESULT":
+        call = None
+        db = object_session(e)
+        if db and payload.get("call_id"):
+            call = db.get(Call, payload["call_id"])
+        if call and call.run_id == e.run_id:
+            approved = _approved_data(call.definition, payload.get("data"))
+            presentation = call.definition.get("presentation") or {}
+            mapping = presentation.get("field_map") or {}
+            fields = ([{"label": label, "value": approved.get(field)} for label, field in mapping.items()]
+                      if isinstance(approved, dict) else [])
+            if approved is None and presentation.get("files_field") == "files":
+                approved = {}
+            component = presentation.get("component", "detail")
+            title = presentation.get("title", "业务结果")
+            allowed_files = {item.get("id"): item for item in (call.result or {}).get("files", [])
+                             if isinstance(item, dict) and isinstance(item.get("id"), str)}
+            files = [{key: item[key] for key in ("id", "filename", "media_type", "size") if key in item}
+                     for item in allowed_files.values()][:20] if approved is not None else []
+        elif not payload.get("call_id") and payload.get("title") == "答复" and isinstance(payload.get("data"), str):
+            approved, fields, files, component, title = payload["data"][:12000], [], [], "text", "答复"
+        else:
+            approved, fields, files, component, title = None, [], [], "detail", "业务结果"
+        public = {"status": call.status if call and call.run_id == e.run_id else "SUCCEEDED",
+                  "component": component if component in {"detail", "table", "text", "markdown", "citation", "file"} else "detail",
+                  "title": str(title)[:160], "data": approved,
+                  "fields": fields, "files": files, "fixture_mode": bool(payload.get("fixture_mode", False)),
+                  "result_unavailable": bool(payload.get("result_unavailable", False) or approved is None)}
+    else:
+        codes = {"BUSINESS_FAILED": "业务处理未成功", "OUTPUT_CONTRACT_ERROR": "业务结果无法按已发布格式展示",
+                 "RESULT_UNAVAILABLE": "业务操作已完成，结果暂不可展示", "UNKNOWN": "结果尚不明确，请核对后再操作",
+                 "STEP_FAILED": "部分业务步骤未完成", "PLAN_LIMIT": "本次请求超过执行上限",
+                 "PLAN_ARGUMENTS": "业务参数不符合已发布规则", "FILE_REJECTED": "文件无法安全展示",
+                 "FORBIDDEN": "当前权限无法完成请求", "OUT_OF_SCOPE": "当前功能无法完成请求"}
+        code = payload.get("code")
+        public = {"message": codes.get(code, "请求未完成，请查看运行状态"), "code": code if code in codes else "ERROR"}
     return {"schema_version": "1", "conversation_id": e.conversation_id, "run_id": e.run_id,
-            "revision": e.revision, "sequence": e.sequence, "event_type": e.event_type, "payload": e.payload}
+            "revision": e.revision, "sequence": e.sequence, "event_type": e.event_type, "payload": public}
 
 
 def run_view(db, run):
-    from .context_binding import binding_summaries
+    authorize_run_capabilities(db, run)
     if run.question and run.question.get("kind") in {"entity_mention", "entity_choice", "history_choice"}:
         from .context_binding import authorize_question
         try:
@@ -340,11 +635,13 @@ def run_view(db, run):
         except (ValueError, PermissionError):
             raise HTTPException(403, "Question entity or source access was revoked")
     return {"run_id": run.id, "conversation_id": run.conversation_id, "revision": run.revision, "status": run.status,
-            "decision": run.decision, "question": run.question,
-            "calls": [{"id": c.id, "action_id": c.action_id, "capability_id": c.capability_id, "status": c.status, "operation_id": c.operation_id}
+            "decision": run.decision, "question": _runtime_question(run.question),
+            "calls": [{"id": c.id, "status": c.status}
                       for c in db.scalars(select(Call).where(Call.run_id == run.id)).all()], "fixture_mode": settings().fixture_mode,
-            "bindings": binding_summaries(run.bindings)}
+            "bindings": [], "steps": _runtime_steps(db, run), "timing": _runtime_timing(db, run)}
 
 
 def status_event(db, run, message=None):
+    if run.status in {"SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"} and run.finished_at is None:
+        run.finished_at = now()
     emit(db, run, "STATUS", {"status": run.status, "decision": run.decision, "message": message, "fixture_mode": settings().fixture_mode})

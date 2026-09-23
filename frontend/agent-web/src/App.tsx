@@ -87,7 +87,10 @@ export function AgentApp() {
       const epoch = authEpoch.current;
       try {
         const value = await api.post<Identity>("/api/v2/runtime/embed/exchange", { ticket: event.data.ticket, agent_id: agentId, host_origin: context.hostOrigin, instance_nonce: localNonce, runtime_session_id: resumeId });
-        if (active && epoch === authEpoch.current) accept(value);
+        if (active && epoch === authEpoch.current) {
+          accept(value);
+          notifyHost("AGENT_AUTHENTICATED", { runtime_session_id: value.runtime_session_id });
+        }
       } catch (e) {
         if (active && epoch === authEpoch.current) {
           setError(errorText(e)); notifyHost("AGENT_ERROR", { message: "身份兑换失败，请由宿主重新连接。" });

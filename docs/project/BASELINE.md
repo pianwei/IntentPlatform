@@ -18,7 +18,7 @@
 | 项目位置 | 本文件所在项目根目录，当前为 `D:/pianwei/work/intent` | 移动目录后使用相对路径，不固化个人机器路径到技能 |
 | 工程阶段 | 已开始本地 API、Worker、双前端与 PostgreSQL 实现；真实资源联调尚缺条件 | 实测和未完成范围见 TASKS 引用证据 |
 | 代码、依赖、运行命令 | backend/requirements.txt、constraints.txt、pyproject.toml；frontend/package.json、package-lock.json；Compose 与 scripts/dev.ps1 | 实际变更时同步 TESTING 和运行手册 |
-| Git、远程、分支、CI | 本地 `main` 首个源码基线提交 `8bc4644`；尚无远程、分支保护或 CI | 后续提交以实际记录为准，本地提交不等于远程合并或发布 |
+| Git、远程、分支、CI | 本地 `main` 首个源码基线提交 `8bc4644`；当前 Demo 工作在 `codex/INT-017-local-candidate`，尚无远程、分支保护或 CI | 后续提交以实际记录为准，本地提交不等于远程合并或发布 |
 | 技术方向 | FastAPI/Pydantic/HTTPX、SQLAlchemy/Alembic、PostgreSQL，API/Worker 同库；React/TypeScript 双前端及 assistant-ui | 版本以锁定清单为准；内网兼容仍需实际验证 |
 | 应用入口 | 同一域名下`/console/`、`/chat/{public_id}`、`/embed/{public_id}`；本地默认5173，两个前端保持独立构建与权限边界 | 外观、渠道与嵌入在Console配置发布；不以增加智能体为由新增服务，见DEC-012/013 |
 | 产品版本 | 0.1.0，唯一来源 backend/pyproject.toml；前端包为私有工程 | 发布时核对制品与源配置，V2.1仍是方案版本 |
@@ -31,7 +31,7 @@
 
 功能名称、接口 URL、示例 ID、JSON 字段样例、框架选型、准确率、样本量、时延和人员排期都不能直接当作真实环境事实。REQ 编号和验收映射见 [REQUIREMENTS.md](REQUIREMENTS.md)，接口细节仍以原契约为依据。
 
-完整自主规划、复杂任务编排和全行场景覆盖不作为一期前提。M1 的少量功能贯通只是中间结果，不能替代 20 功能验收。
+完整自主规划、任意 DAG 和全行场景覆盖不作为一期前提。用户2026-09-23另授权近期 Demo 的有限动态规划（最多8步、5对象、20调用、3并行），由业务 Skill 优先、模型提议和服务端校验组成，见 DEC-018；它不替代 20 个真实功能验收。M1 的少量功能贯通仍只是中间结果。
 
 用户确认一期同时覆盖 HTTP/OpenAPI、Dify 和 HiAgent；旧会话固定创建时 AgentRelease，撤销独立生效；两个子集智能体及新增领域必须分别有证据。新增领域可与第21项合并演示，但不能省略原20项完整S1。
 

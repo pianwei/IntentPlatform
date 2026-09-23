@@ -178,6 +178,43 @@ def _http_v2(*args):
 CONNECTOR_IMPLEMENTATIONS["http"]["2"] = _http_v2
 
 
+def _execute_fixture_v2(definition, arguments, call_id, user_id, workspace_id, reconcile_operation=None, before_send=None):
+    """Workspace-persistent synthetic business operations, never an external API."""
+    connector_checks(definition, workspace_id)
+    from .demo import execute, initial_state, reconcile, function_packages
+    from .demo.engine import authorize_operation
+    from .models import DemoState
+    from .db import engine, set_identity
+    from sqlalchemy import select, text
+    from sqlalchemy.orm import Session
+    key = definition["connector"].get("workflow_id")
+    if key not in {package["key"] for package in function_packages()}:
+        raise ValueError("Unknown synthetic operation")
+    with Session(engine) as authority_db:
+        set_identity(authority_db, user_id)
+        authority_state = authority_db.get(DemoState, workspace_id)
+        authorize_operation(key, arguments, authority_state.state if authority_state else initial_state(), user_id)
+    if before_send:
+        before_send()
+    with Session(engine) as db, db.begin():
+        set_identity(db, user_id)
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:workspace_id))"), {"workspace_id": workspace_id})
+        state = db.scalar(select(DemoState).where(DemoState.workspace_id == workspace_id).with_for_update())
+        if state is None:
+            state = DemoState(workspace_id=workspace_id, state=initial_state())
+            db.add(state); db.flush()
+        authorize_operation(key, arguments, state.state, user_id)
+        if reconcile_operation:
+            return reconcile(reconcile_operation, state.state)
+        envelope, next_state = execute(key, arguments, state.state, call_id, user_id=user_id)
+        if next_state != state.state:
+            state.state = next_state; state.revision += 1
+        return envelope
+
+
+CONNECTOR_IMPLEMENTATIONS["fixture"]["2"] = _execute_fixture_v2
+
+
 def execute_connector(definition, arguments, call_id, user_id, workspace_id, reconcile_operation=None, before_send=None):
     c = definition["connector"]
     implementation = CONNECTOR_IMPLEMENTATIONS.get(c["kind"], {}).get(c.get("version", "1"))
@@ -205,6 +242,7 @@ ROUTING_PROMPTS["router-v2"] = (
 
 from .routing_v3 import PROMPT_V3
 ROUTING_PROMPTS["router-v3"] = PROMPT_V3
+ROUTING_PROMPTS["planner-v1"] = "Finite planner-v1 is handled by the persistent planning worker"
 
 
 def route_model(text, candidates, answers=None, policy_version="router-v1", context=None):

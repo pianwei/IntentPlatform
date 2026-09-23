@@ -3,7 +3,7 @@ import time
 import logging
 from contextlib import contextmanager
 from datetime import timedelta
-from sqlalchemy import select, or_, and_
+from sqlalchemy import select, or_, and_, func
 from sqlalchemy.orm import Session
 from .db import engine, set_identity, now, uid
 from .config import settings
@@ -78,7 +78,7 @@ def _claim_run(user_id, ws):
         conv = db.get(Conversation, run.conversation_id)
         release = db.get(Release, conv.release_id)
         cfg = settings()
-        if error := dependency_error(release.snapshot):
+        if error := dependency_error(release.snapshot, db):
             terminal_error(db, run, "ERROR", error)
             return {"done": True}
         candidates = visible_candidates(db, release, token)
@@ -94,14 +94,19 @@ def _claim_run(user_id, ws):
         status_event(db, run)
         return {"id": run.id, "user_id": user_id, "revision": run.revision, "text": run.text,
                 "candidates": candidates, "proposal": run.proposal, "prompt_policy_version": release.snapshot["prompt_policy_version"],
-                "release_id": release.id, "attempt_id": attempt.id}
+                "release_id": release.id, "attempt_id": attempt.id, "workspace_id": ws,
+                "snapshot": release.snapshot}
 
 
 def prepare_run(work):
     started = time.monotonic(); work["metrics"] = {}
     try:
-        with resolver_budget():
-            _prepare_run(work)
+        if work.get("prompt_policy_version") == "planner-v1":
+            from .planning import prepare
+            prepare(work)
+        else:
+            with resolver_budget():
+                _prepare_run(work)
     finally:
         finish_attempt(work, time.monotonic() - started)
 
@@ -343,6 +348,12 @@ def _claim_call(user_id, ws):
             if call.dispatched_at is None:
                 call.status = "PENDING"; call.lease_until = None
                 return {"done": True}
+        from .models import ExecutionPlan
+        if db.scalar(select(ExecutionPlan.id).where(ExecutionPlan.run_id == run.id)):
+            active_calls = db.scalar(select(func.count(Call.id)).where(Call.run_id == run.id, Call.status == "EXECUTING",
+                                                                 Call.lease_until > now())) or 0
+            if active_calls >= 3:
+                return None
         binding_budget = 20 if call.bindings else 0
         lease = now() + timedelta(seconds=max(settings().worker_lease_seconds, call.definition["connector"]["timeout_seconds"] + binding_budget + 10))
         attempt = claim_attempt(db, run, "execution", lease, call.id)
@@ -353,6 +364,11 @@ def _claim_call(user_id, ws):
 
 
 def aggregate_status(db, run):
+    from .models import ExecutionPlan
+    if db.scalar(select(ExecutionPlan.id).where(ExecutionPlan.run_id == run.id)):
+        from .planning import advance
+        advance(db, run)
+        return
     states = list(db.scalars(select(Call.status).where(Call.run_id == run.id)))
     if any(s in {"PENDING", "EXECUTING"} for s in states):
         run.status = "EXECUTING"
@@ -424,7 +440,9 @@ def finish_call(work, result):
             emit(db, run, "RESULT", payload)
         db.flush()
         aggregate_status(db, run)
-        status_event(db, run)
+        from .models import ExecutionPlan
+        if not db.scalar(select(ExecutionPlan.id).where(ExecutionPlan.run_id == run.id)):
+            status_event(db, run)
         audit(db, run.user_id, run.workspace_id, "call.finished", call.id, {"status": call.status, "run_id": run.id, "revision": call.revision})
 
 
@@ -472,7 +490,7 @@ def dispatch_permitted(db, run, call, function):
     if call.definition["requires_confirmation"] and (not run.confirmed or not run.confirmation_expires_at or run.confirmation_expires_at <= now()):
         return False
     release = db.get(Release, db.get(Conversation, run.conversation_id).release_id)
-    return dependency_error(release.snapshot) is None
+    return dependency_error(release.snapshot, db) is None
 
 
 def mark_dispatch(work):
@@ -509,19 +527,19 @@ def _reconcile_one(user_id, ws):
         set_identity(db, user_id)
         lock_workspace(db, ws)
         calls = db.scalars(select(Call).join(Run, Run.id == Call.run_id).where(Run.user_id == user_id, Run.workspace_id == ws, Call.status.in_(["UNKNOWN", "RECONCILING"]),
-                          Call.definition["connector"]["status_endpoint"].as_string().is_not(None),
                           or_(Call.lease_until.is_(None), Call.lease_until < now())).order_by((Call.status == "RECONCILING").desc(), Call.lease_until.asc().nulls_first(), Call.id).with_for_update(of=Call, skip_locked=True).limit(20)).all()
         work = None
         for call in calls:
             connector = call.definition["connector"]
-            lookup = call.operation_id or (call.id if connector.get("reconcile_by") == "idempotency_key" and connector.get("idempotency_header") else None)
-            if not connector.get("status_endpoint") or not lookup:
+            fixture_v2 = connector.get("kind") == "fixture" and connector.get("version") == "2"
+            lookup = call.operation_id or (call.id if fixture_v2 or (connector.get("reconcile_by") == "idempotency_key" and connector.get("idempotency_header")) else None)
+            if (not connector.get("status_endpoint") and not fixture_v2) or not lookup:
                 call.status = "UNKNOWN"; call.lease_until = now() + timedelta(seconds=30)
                 continue
             run = db.get(Run, call.run_id)
             f = db.get(Function, call.capability_id)
             release = db.get(Release, db.get(Conversation, run.conversation_id).release_id)
-            if not current_token(db, run) or not f or f.disabled or not permitted(f, user_id) or dependency_error(release.snapshot):
+            if not current_token(db, run) or not f or f.disabled or not permitted(f, user_id) or dependency_error(release.snapshot, db):
                 call.status = "UNKNOWN"
                 call.lease_until = now() + timedelta(seconds=30)
                 continue
@@ -559,7 +577,7 @@ def authorize_reconciliation(work):
         run = db.get(Run, work["run_id"]); call = db.get(Call, work["id"])
         f = db.get(Function, call.capability_id)
         release = db.get(Release, db.get(Conversation, run.conversation_id).release_id)
-        if call.status != "RECONCILING" or not attempt_live(db, work) or not current_token(db, run) or not f or f.disabled or not permitted(f, run.user_id) or dependency_error(release.snapshot):
+        if call.status != "RECONCILING" or not attempt_live(db, work) or not current_token(db, run) or not f or f.disabled or not permitted(f, run.user_id) or dependency_error(release.snapshot, db):
             raise PermissionError("Reconciliation paused after authorization change")
 
 

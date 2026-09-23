@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Check, Copy, ExternalLink, Globe, Palette, ShieldCheck, Upload } from "lucide-react";
+import { ArrowLeft, Check, Copy, ExternalLink, Globe, Palette, ShieldCheck, Upload, Workflow } from "lucide-react";
 import { ApiClient, errorText } from "../../shared/api";
 import { Badge, Notice } from "../../shared/ui";
 import { ApplicationPreview } from "../../shared/ApplicationView";
@@ -8,6 +8,9 @@ import type { AccessPolicy, Agent, Capability, Channels, PublicApp, Release, Run
 import "./AgentEditor.css";
 import { useGovernanceCatalog } from "./useGovernanceCatalog";
 import { connectorLabels } from "../../shared/governance";
+import type { ModelProfile } from "./ModelSettingsPage";
+
+type BusinessSkill = { id: string; key: string; definition: { name: string; description: string }; latest_version: number; disabled: boolean };
 
 const lines = (value: string) => [...new Set(value.split("\n").map(s => s.trim()).filter(Boolean))];
 export function AgentEditor({ api, workspace, item, functions, publishable = true, onClose, onSaved }: {
@@ -16,10 +19,15 @@ export function AgentEditor({ api, workspace, item, functions, publishable = tru
   onClose: () => void; onSaved: () => Promise<void>;
 }) {
   const [current, setCurrent] = useState(item);
-  const [tab, setTab] = useState<"interface" | "access" | "publish">("interface");
+  const [tab, setTab] = useState<"interface" | "planning" | "access" | "publish">("interface");
   const [ui, setUI] = useState<RuntimeUI>(runtimeUI(item));
   const [name, setName] = useState(item?.name ?? "");
   const [selected, setSelected] = useState(item?.capability_ids ?? []);
+  const [planning, setPlanning] = useState(item?.planning_enabled ?? false);
+  const [selectedSkills, setSelectedSkills] = useState(item?.business_skill_ids ?? []);
+  const [modelProfileId, setModelProfileId] = useState(item?.model_profile_id ?? "");
+  const [skills, setSkills] = useState<BusinessSkill[]>([]);
+  const [models, setModels] = useState<ModelProfile[]>([]);
   const [origins, setOrigins] = useState(item?.allowed_origins?.join("\n") ?? "");
   const [channels, setChannels] = useState<Channels>(item?.channels ?? { chat: true, embed: false });
   const [access, setAccess] = useState<AccessPolicy>(item?.access ?? { access_mode: "workspace", allowed_users: [] });
@@ -37,6 +45,16 @@ export function AgentEditor({ api, workspace, item, functions, publishable = tru
   const { catalog, error: catalogError, loading: catalogLoading, reload: reloadCatalog } = useGovernanceCatalog(api, workspace);
   const prefix = `/api/v2/management/workspaces/${encodeURIComponent(workspace)}`;
   const path = `${prefix}/agents/${current?.id}`;
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      api.get<BusinessSkill[]>(`${prefix}/business-skills`),
+      api.get<ModelProfile[]>(`${prefix}/model-profiles`),
+    ]).then(([skillItems, profileItems]) => {
+      if (active) { setSkills(skillItems); setModels(profileItems); }
+    }).catch(e => active && setError(errorText(e)));
+    return () => { active = false; };
+  }, [api, prefix]);
   useEffect(() => {
     if (ui.icon.kind !== "asset" || !ui.icon.value) { setAssetUrl(undefined); return; }
     let active = true, url = "";
@@ -61,7 +79,7 @@ export function AgentEditor({ api, workspace, item, functions, publishable = tru
   }
   async function save() {
     await execute(async () => {
-      const body = { name, revision: current?.revision, capability_ids: selected, allowed_origins: lines(origins), suggested_questions: ui.suggested_questions, runtime_ui: ui, channels, ...(integrationRefs === undefined ? {} : { integration_refs: integrationRefs }) };
+      const body = { name, revision: current?.revision, capability_ids: selected, allowed_origins: lines(origins), suggested_questions: ui.suggested_questions, runtime_ui: ui, channels, planning_enabled: planning, business_skill_ids: selectedSkills, model_profile_id: modelProfileId || null, ...(integrationRefs === undefined ? {} : { integration_refs: integrationRefs }) };
       const saved = current ? await api.patch<Agent>(`${path}/draft`, body) : await api.post<Agent>(`${prefix}/agents`, body);
       setCurrent(value => ({ ...(value ?? { name, workspace_id: workspace, suggested_questions: ui.suggested_questions, fixture_mode: false }), ...saved }));
       if (saved.integration_refs !== undefined) setIntegrationRefs(saved.integration_refs);
@@ -108,7 +126,7 @@ export function AgentEditor({ api, workspace, item, functions, publishable = tru
       <button className="primary" disabled={busy || !name.trim() || !selected.length} onClick={() => void save()}>保存智能体草稿</button>
     </header>
     <nav className="application-tabs" aria-label="智能体配置页">
-      {([["interface", "对话界面", Palette], ["access", "访问控制", ShieldCheck], ["publish", "发布与嵌入", Globe]] as const).map(([key, label, Icon]) => <button key={key} aria-current={tab === key ? "page" : undefined} className={tab === key ? "active" : ""} onClick={() => setTab(key)}><Icon size={17} />{label}</button>)}
+      {([["interface", "对话界面", Palette], ["planning", "任务策划", Workflow], ["access", "访问控制", ShieldCheck], ["publish", "发布与嵌入", Globe]] as const).map(([key, label, Icon]) => <button key={key} aria-current={tab === key ? "page" : undefined} className={tab === key ? "active" : ""} onClick={() => setTab(key)}><Icon size={17} />{label}</button>)}
     </nav>
     <div className="application-editor-content"><fieldset className="application-editor-fields" disabled={busy}>
       {error && <Notice kind="error">{error}</Notice>}{notice && <Notice kind="success">{notice}</Notice>}
@@ -124,6 +142,17 @@ export function AgentEditor({ api, workspace, item, functions, publishable = tru
           <label>输入框提示<input value={ui.input_placeholder} onChange={e => edit({ input_placeholder: e.target.value })} /></label>
           <label className="checkbox"><input type="checkbox" checked={ui.show_history} onChange={e => edit({ show_history: e.target.checked })} />显示历史会话侧栏</label>
         </section><div className="application-preview-column"><div className="preview-heading"><strong>草稿预览</strong><div className="preview-modes"><button aria-pressed={!previewEmbed} onClick={() => setPreviewEmbed(false)}>独立页面</button><button aria-pressed={previewEmbed} onClick={() => setPreviewEmbed(true)}>嵌入页面</button></div><Badge>未发布</Badge></div><ApplicationPreview ui={ui} assetUrl={assetUrl} embedded={previewEmbed} /></div>
+      </div>}
+      {tab === "planning" && <div className="application-two-column">
+        <section className="application-settings"><h2>三层任务策划</h2><p className="muted">发布时固定领域、动作、功能、Skill 与模型版本。原有智能体可继续使用旧路由策略。</p>
+          <label className="checkbox"><input type="checkbox" checked={planning} onChange={e => { setPlanning(e.target.checked); setDirty(true); }} />启用实体层 → 动力层 → 策划层有限计划</label>
+          {planning && <><h3>业务 Skills</h3><p className="muted small">优先匹配已发布的规则；未命中时由所选模型规划。工程预览中未配置模型时，只有精确命中的演示 Skill 可运行。</p>
+            <div className="capability-picker">{skills.map(skill => <label className="checkbox" key={skill.id}><input type="checkbox" checked={selectedSkills.includes(skill.id)} disabled={!skill.latest_version || skill.disabled} onChange={e => { setSelectedSkills(e.target.checked ? [...selectedSkills, skill.id] : selectedSkills.filter(id => id !== skill.id)); setDirty(true); }} /><span>{skill.definition.name}<small className="block muted">v{skill.latest_version} · {skill.disabled ? "已停用" : skill.definition.description}</small></span></label>)}</div>
+            <label>模型配置<select value={modelProfileId} onChange={e => { setModelProfileId(e.target.value); setDirty(true); }}><option value="">不配置模型，仅开发 Skill 预览</option>{models.filter(profile => !profile.disabled && profile.latest_version).map(profile => <option key={profile.id} value={profile.id}>{profile.name} · {profile.latest?.config.model_version} · v{profile.latest_version}</option>)}</select></label>
+            {!modelProfileId && <Notice>无匹配业务 Skill 的问题需要模型配置；当前只可验证规则链，不能宣称智能规划 Demo 已验收。</Notice>}
+          </>}
+        </section>
+        <section className="application-settings"><h2>执行边界</h2><p>每轮最多 8 个逻辑步骤、5 个批量对象、20 次业务调用和 3 个并行调用；写操作必须在最后一步经确认。计划由后端验证，未获授权的功能不会执行。</p><p className="muted">仅当前智能体选中的已发布功能进入候选集。修改草稿不影响已发布应用，旧会话仍使用创建时的版本。</p></section>
       </div>}
       {tab === "access" && <div className="application-two-column">
         <section className="application-settings integration-selector"><h2>可信身份集成</h2><p className="muted">从当前空间获准目录中选择，保存草稿并发布后生效。身份仍由可信服务校验；此处不能新增信任来源或填写密钥。</p>
