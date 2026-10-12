@@ -32,7 +32,7 @@
 | 项目位置 | 本文件所在项目根目录，当前为 `D:/pianwei/work/intent` | 移动目录后使用相对路径，不固化个人机器路径到技能 |
 | 工程阶段 | 已开始本地 API、Worker、双前端与 PostgreSQL 实现；真实资源联调尚缺条件 | 实测和未完成范围见 TASKS 引用证据 |
 | 代码、依赖、运行命令 | backend/requirements.txt、constraints.txt、pyproject.toml；frontend/package.json、package-lock.json；Compose 与 scripts/dev.ps1 | 实际变更时同步 TESTING 和运行手册 |
-| Git、远程、分支、CI | 本地 `main` 首个源码基线提交 `8bc4644`；当前 Demo 工作在 `codex/INT-017-local-candidate`，尚无远程、分支保护或 CI | 后续提交以实际记录为准，本地提交不等于远程合并或发布 |
+| Git、远程、分支、CI | 本地`main`已推送至`origin/main`，当前包含本轮`5ef732c`；GitHub远程仓库为`pianwei/IntentPlatform`，既有`codex/INT-017-local-candidate`功能分支保留。分支保护与CI状态未验证 | 直接推送仅在用户明确授权时进行；本次未创建PR、未部署生产，本地交付不等于生产发布 |
 | 技术方向 | FastAPI/Pydantic/HTTPX、SQLAlchemy/Alembic、PostgreSQL，API/Worker 同库；React/TypeScript 双前端及 assistant-ui | 版本以锁定清单为准；内网兼容仍需实际验证 |
 | 应用入口 | 同一域名下`/console/`、`/chat/{public_id}`、`/embed/{public_id}`；本地默认5173，两个前端保持独立构建与权限边界 | 外观、渠道与嵌入在Console配置发布；不以增加智能体为由新增服务，见DEC-012/013 |
 | 当前产品结构 | 空间功能库支持直接/单层组合功能；智能体发布生成专属实体、动力、策划投影，运行采用`three-layer-v1`；历史策略保留 | 新发布固定依赖与提示修订，修改草稿不改旧会话；当前验证对象见INT-019记录 |
