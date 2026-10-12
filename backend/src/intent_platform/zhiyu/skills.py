@@ -73,6 +73,13 @@ def composite_definition(skill, skill_version_id, dependencies, domain_ref):
             if isinstance(ref, dict) and "$input" in ref:
                 inputs[ref["$input"]] = deepcopy(by_key[step["capability_key"]]["definition"]["input_schema"]["properties"][field])
     outputs = {name: deepcopy(by_key[steps[name]["capability_key"]]["definition"]["output_schema"]) for name in metadata["result_steps"]}
+    from ..result_presentation import markdown_paths
+    nested_markdown = markdown_paths(obj(outputs))
+    presentation = {"component": "markdown" if len(nested_markdown) == 1 else "detail",
+                    "title": skill["name"], "field_map": {name: name for name in outputs},
+                    "response_mode": "content" if len(nested_markdown) == 1 else "summary"}
+    if len(nested_markdown) == 1:
+        presentation["content_path"] = nested_markdown[0]
     effect = "WRITE" if any(c["definition"]["effect"] == "WRITE" for c in dependencies) else "READ_ONLY"
     entity = "zhiyu:" + metadata["entity"]
     return {"name": skill["name"], "description": "【智驭模拟组合】" + skill["description"],
@@ -83,7 +90,7 @@ def composite_definition(skill, skill_version_id, dependencies, domain_ref):
         "input_schema": obj(inputs, sorted(inputs)), "output_schema": obj(outputs, sorted(outputs)),
         "connector": {"kind": "fixture", "version": "3", "workflow_id": skill["key"].replace("zhiyu.skill.", "zhiyu.composite.")},
         "effect": effect, "requires_confirmation": effect == "WRITE",
-        "presentation": {"component": "detail", "title": skill["name"], "field_map": {name: name for name in outputs}},
+        "presentation": presentation,
         "positive_examples": [], "negative_examples": [],
         "participant_roles": [{"role": "target", "type": entity, "required": True, "min_count": 1, "max_count": 1}],
         "relations": [], "success_condition": {"field": "status", "operator": "eq", "value": "SUCCEEDED"},

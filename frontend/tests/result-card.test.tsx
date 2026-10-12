@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ResultCard } from "../agent-web/src/ResultCard";
+import { BusinessResultContent } from "../shared/BusinessResult";
 import type { Run, RuntimeEvent } from "../shared/types";
 afterEach(cleanup);
 const question: RuntimeEvent = {
@@ -21,6 +22,14 @@ const run: Run = {
   revision: 2,
   status: "WAITING_INPUT",
 };
+it("renders a wrapped list as one table when the published component requests a table", () => {
+  render(<BusinessResultContent data={{ component: "table", data: { customers: [
+    { name: "星澜科技", city: "杭州" }, { name: "远川制造", city: "杭州" },
+  ] } }} />);
+  expect(screen.getAllByRole("table")).toHaveLength(1);
+  expect(screen.getByRole("columnheader", { name: "名称" })).toBeVisible();
+  expect(screen.getByRole("cell", { name: "星澜科技" })).toBeVisible();
+});
 describe("structured business interaction", () => {
   it("submits fields bound to the original question and leaves optional values absent", () => {
     const onAction = vi.fn().mockResolvedValue(undefined);

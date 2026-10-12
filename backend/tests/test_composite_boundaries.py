@@ -62,3 +62,22 @@ def test_same_name_results_use_exact_versioned_presentation(monkeypatch):
     assert results[0]["fields"] == [{"label": "first", "value": 1}]
     assert results[1]["fields"] == [{"label": "second", "value": 2}]
     assert all("capability_id" not in row for row in results)
+
+
+def test_markdown_composite_component_receives_the_declared_string_not_its_json_wrapper(monkeypatch):
+    from types import SimpleNamespace
+    from intent_platform.services import final_components
+    definitions = [{"capability_id": "visit", "definition": {
+        "name": "访前准备", "execution_kind": "composite",
+        "output_schema": {"type": "object", "properties": {"brief": {"type": "object", "properties": {
+            "markdown": {"type": "string"}}, "required": ["markdown"]}}},
+        "presentation": {"component": "markdown", "response_mode": "content", "content_path": "brief.markdown",
+                         "title": "访前准备", "field_map": {"brief": "brief"}},
+    }}]
+    db = SimpleNamespace(scalar=lambda query: SimpleNamespace(release_id="r"),
+                         get=lambda cls, key: SimpleNamespace(snapshot={"capabilities": definitions}))
+    markdown = "# 星澜科技访前一页纸\n\n## 客户事实"
+    monkeypatch.setattr("intent_platform.planning.partial_result_rows", lambda *args: [
+        {"capability_id": "visit", "name": "访前准备", "data": {"brief": {"markdown": markdown}}}])
+    result = final_components(db, "run")
+    assert result == [{"title": "访前准备", "component": "markdown", "data": markdown, "fields": []}]

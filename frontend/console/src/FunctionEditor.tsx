@@ -55,7 +55,7 @@ export const blankDefinition: FunctionDefinition = {
   requires_confirmation: false,
   allowed_users: [],
   preconditions: [],
-  presentation: { component: "detail", title: "查询结果", field_map: {}, files_field: null },
+  presentation: { component: "detail", title: "查询结果", field_map: {}, files_field: null, response_mode: "structured", content_path: null },
   positive_examples: [],
   negative_examples: [],
 };
@@ -65,6 +65,8 @@ export function parseFunctionDraft(raw: string): FunctionDefinition {
   if (!object(value) || !object(value.connector) || !object(value.input_schema) || !object(value.presentation)) throw new Error("定义、connector、input_schema 和 presentation 必须是对象");
   if (value.output_schema !== undefined && value.output_schema !== null && !object(value.output_schema)) throw new Error("output_schema 必须是对象或 null");
   if (!object(value.presentation.field_map)) throw new Error("presentation.field_map 必须是字段映射对象");
+  if (value.presentation.response_mode !== undefined && !["structured", "summary", "content"].includes(value.presentation.response_mode)) throw new Error("presentation.response_mode 必须是 structured、summary 或 content");
+  if (value.presentation.content_path !== undefined && value.presentation.content_path !== null && typeof value.presentation.content_path !== "string") throw new Error("presentation.content_path 必须是字符串或 null");
   for (const key of ["name", "description", "object_type", "action", "result_type", "effect"]) if (typeof value[key] !== "string") throw new Error(`${key} 必须是字符串`);
   if (typeof value.connector.kind !== "string" || typeof value.connector.method !== "string") throw new Error("connector.kind 与 method 必须是字符串");
   if (value.execution_kind && !["direct", "composite"].includes(value.execution_kind)) throw new Error("执行类型必须为直接调用或组合功能");

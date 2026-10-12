@@ -4,6 +4,18 @@
 
 任务格式：ID/名称、等级/阶段/需求、目标与范围、验收、负责人、依赖/阻塞、验证计划/结果、四项事实（产出、验证、集成、交付）、目标版本、下一步。新增任务沿用下一可用编号；原子任务不足以独立验证时先拆分。工作规则见 [WORKFLOW.md](WORKFLOW.md)。
 
+## INT-033 功能答复模式与结果重复修复
+
+- 状态：已完成本地实现、Docker开发服务刷新并推送至 `origin/main`；等级C（改变功能发布展示契约、模型汇总行为及旧发布读取兼容）；负责人AI主协调者；关联ZY-008、ZY-010；不涉及生产部署。
+- 目标/验收：用户可区分按获准字段结构化展示、展示指定Markdown/文本字段、或由模型归纳三种功能答复方式。同一业务结果不同时由模型答复及结构卡片重复呈现；包装API对象不原样变成JSON答复；旧不可变发布兼容读取且不扩大获准字段。
+- 范围：修复复合访前草稿嵌套Markdown路径；客户列表按获准数组结构渲染表格且跳过重复模型总结；功能配置提供答复模式和文本路径；发布契约验证路径；保留引用、文件及必要交互。历史发布有限推断，不改写快照。
+- 验证计划：后端输出Schema/答复路径/复合投影定向测试；前端答复模式及嵌套对象列表渲染测试和TypeScript检查；Docker开发双端构建、服务健康及入口响应；`git diff --check`。
+- 产出：新增`result_presentation`模式推断/投影；发布契约增加`response_mode`与`content_path`；复合markdown仅渲染其批准字符串；结构化列表直接展示并返回确定性简短前言；模型归纳路径不再附相同业务组件。前端映射编辑器提供三种模式并保留旧Markdown功能的推断行为。已更新工程契约、输出契约、需求、基线、前端说明及相关Skills。
+- 验证：后端输出契约/结果投影/组合边界22通过；TypeScript类型检查`node .\\node_modules\\typescript\\bin\\tsc --noEmit`通过；前端定向Vitest在隔离Docker Node容器18/18通过；开发版Console和Agent Web构建通过；`git diff --check`通过。Windows直接运行Vitest仍受Rollup平台可选包缺失影响，未改动锁文件。完整证据见[验证记录](records/INT-033-result-presentation.md)。
+- 集成：已构建`intent-backend:local`与`intent-web:local`，更新并等待`api`、`worker`、`ingest-worker`、`web`健康就绪；`/health`、`/console/`、当前Chat入口均HTTP 200。Compose操作跳过依赖及迁移服务，PostgreSQL和`intent-local_intent_pgdata`主卷未触碰；隔离Vitest容器使用`--rm --network none`并已自动清理。未部署生产。
+- 交付：代码及项目文档已提交并推送至`origin/main`；具体变更见Git历史和[验证记录](records/INT-033-result-presentation.md)。Skills沿用本任务已同步的稳定答复模式与安全规则，本次服务刷新未新增技能规则。
+- 下一步：无；真实银行接口、身份、正式宿主及生产验收不属于本地INT-033交付。
+
 ## INT-032 模型直接回答失败诊断与本地修复
 
 - 状态：已本地交付并推送至 [GitHub main](https://github.com/pianwei/IntentPlatform/tree/main)（提交`5ef732c`）；等级B（模型回答失败可观测性及后端制品缺陷，不改变运行端错误契约、权限或业务执行协议）；负责人AI主协调者；不涉及生产部署。

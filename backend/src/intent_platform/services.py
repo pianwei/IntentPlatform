@@ -949,11 +949,19 @@ def final_components(db, run_id):
     release = db.get(Release, plan.release_id)
     definitions = {c["capability_id"]: c["definition"] for c in release.snapshot["capabilities"]}
     result = []
+    from .result_presentation import content_path, content_value, response_mode
     for row in partial_result_rows(db, plan):
         definition = definitions.get(row["capability_id"], {})
         presentation = definition.get("presentation", {})
         data = _display_value(row["data"], max_depth=5 if definition.get("execution_kind") == "composite" else 3)
         component = presentation.get("component", "detail")
+        if response_mode(definition) == "content":
+            data = content_value(data, definition)
+            if not isinstance(data, str):
+                # Never fall back to JSON serialization when a declared content
+                # path is absent or no longer matches the pinned result schema.
+                continue
+            component = "markdown" if (content_path(definition) or "").split(".")[-1] == "markdown" else "text"
         result.append({"title": str(presentation.get("title") or row["name"])[:160],
             "component": component if component in {"table", "detail", "citation", "text", "markdown"} else "detail",
             "data": data, "fields": [{"label": str(label)[:80], "value": data.get(key)}
@@ -965,15 +973,15 @@ def final_payload(db, run, answer, fixture_mode):
     """Freeze visible result facts at the event sequence that published them."""
     components = final_components(db, run.id)
     from .models import ExecutionPlan
-    from .planning import partial_result_rows, public_result_rows
-    from .business_markdown import covers_rows
+    from .planning import partial_result_rows
+    from .result_presentation import remove_result_components, response_mode_for_rows
     plan = db.scalar(select(ExecutionPlan).where(ExecutionPlan.run_id == run.id))
     if plan:
         release = db.get(Release, plan.release_id)
-        definitions = [c["definition"] for c in release.snapshot["capabilities"]] if release else []
-        rows = public_result_rows(partial_result_rows(db, plan))
-        if covers_rows(answer, rows, definitions):
-            components = [item for item in components if item["component"] in {"table", "citation"}]
+        capabilities = release.snapshot["capabilities"] if release else []
+        rows = partial_result_rows(db, plan)
+        mode = response_mode_for_rows(rows, capabilities)
+        components = remove_result_components(mode, components)
     return {"status": run.status, "component": "text", "title": "答复", "data": business_answer_text(answer),
             "components": components, "files": final_files(db, run.id),
             "fixture_mode": fixture_mode}

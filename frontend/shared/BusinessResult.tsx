@@ -89,14 +89,14 @@ export function BusinessResultContent({ data }: { data: Record<string, unknown> 
   const component = String(data.component ?? "detail");
   const resultObject = result && typeof result === "object" && !Array.isArray(result)
     ? result as Record<string, unknown> : null;
-  const namedRows = resultObject && Object.entries(resultObject).find(([, value]) =>
-    Array.isArray(value) && value.every(item => item !== null && typeof item === "object" && !Array.isArray(item)));
+  const namedRows = (resultObject && Object.entries(resultObject).find(([, value]) =>
+    Array.isArray(value) && value.every(isRecord))) as [string, Record<string, unknown>[]] | undefined;
   const rows = Array.isArray(result)
     ? result
     : resultObject && Array.isArray(resultObject.rows)
       ? resultObject.rows
       : namedRows
-      ? namedRows[1] as unknown[]
+      ? namedRows[1]
       : null;
   const fields = Array.isArray(data.fields)
     ? (data.fields as { label: string; value: unknown }[])
@@ -106,7 +106,7 @@ export function BusinessResultContent({ data }: { data: Record<string, unknown> 
   const tableRows = rows?.filter(
     (row): row is Record<string, unknown> =>
       row !== null && typeof row === "object" && !Array.isArray(row),
-  );
+  ) ?? null;
   return <>
       {data.result_unavailable === true ? (
         <p className="result-text" role="status">业务操作已确认成功，但返回内容未通过已发布的展示契约。请按调用记录核对结果；此处不会重新提交业务。</p>

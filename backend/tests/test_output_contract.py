@@ -5,6 +5,7 @@ import pytest
 
 from intent_platform.openapi_import import parse_openapi
 from intent_platform.output_contract import check_output_contract, project_output, OutputContractError
+from intent_platform.schemas import Definition
 from test_openapi_parser import specification
 
 
@@ -94,6 +95,23 @@ def test_file_field_is_explicit_and_cannot_be_display_data():
         check_output_contract(d)
 
 
+def test_content_mode_requires_a_schema_approved_string_path():
+    d = {"output_schema": {"type": "object", "properties": {
+            "brief": {"type": "object", "properties": {
+                "markdown": {"type": "string", "maxLength": 100},
+                "draft_only": {"type": "boolean"}}, "required": ["markdown", "draft_only"], "additionalProperties": False}},
+            "required": ["brief"], "additionalProperties": False},
+         "presentation": {"component": "markdown", "response_mode": "content", "content_path": "brief.markdown",
+                          "field_map": {"访前准备": "brief"}}}
+    assert check_output_contract(d) == d["output_schema"]
+    d["presentation"]["content_path"] = "brief.draft_only"
+    with pytest.raises(ValueError, match="string field"):
+        check_output_contract(d)
+    d["presentation"]["content_path"] = "brief.not_declared"
+    with pytest.raises(ValueError, match="declared output field"):
+        check_output_contract(d)
+
+
 def test_no_output_contract_discards_unapproved_remote_payload():
     from intent_platform.schemas import Definition
 
@@ -111,3 +129,21 @@ def test_no_output_contract_discards_unapproved_remote_payload():
         check_output_contract({**draft, "result_bindings": [{"collection_path": "rows", "id_field": "id", "label_field": "name"}]})
     with pytest.raises(ValueError, match="no result"):
         check_output_contract({**draft, "composite": {"final_output_mapping": {"result": {"$step": "step", "path": "value"}}}})
+
+
+def test_legacy_definition_infers_one_compatible_response_mode():
+    base = {"name": "legacy", "description": "legacy", "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "output_schema": {"type": "object", "properties": {"brief": {"type": "object", "properties": {
+                "markdown": {"type": "string"}}}}},
+            "presentation": {"component": "markdown", "field_map": {"brief": "brief"}}}
+    markdown = Definition.model_validate(base).model_dump()
+    assert markdown["presentation"]["response_mode"] == "content"
+    assert markdown["presentation"]["content_path"] == "brief.markdown"
+
+    customer_rows = {**base, "presentation": {"component": "detail"}, "output_schema": {"type": "object", "properties": {
+        "customers": {"type": "array", "items": {"type": "object"}}}}}
+    assert Definition.model_validate(customer_rows).presentation.response_mode == "structured"
+
+    freeform = {**base, "presentation": {"component": "detail"}, "output_schema": {"type": "object", "properties": {
+        "message": {"type": "string"}}}}
+    assert Definition.model_validate(freeform).presentation.response_mode == "summary"

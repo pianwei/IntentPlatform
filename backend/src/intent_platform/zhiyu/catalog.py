@@ -57,10 +57,12 @@ def action_definitions():
                 ("PRACTICE", "陪练", "开启独立模拟对话，不将其内容当成真实业务事实。"),
                 ("CREATE", "创建", "确认后创建模拟营销任务，按操作编号幂等。")]]
 
-def _p(key, name, scenario, entity, action, inputs, outputs, sample, aliases, purpose, required=None):
+def _p(key, name, scenario, entity, action, inputs, outputs, sample, aliases, purpose, required=None,
+       response_mode="structured", component="detail"):
     return dict(key="zhiyu." + key, name=name, scenario=scenario, entity=entity, action=action,
                 inputs=inputs, outputs=outputs, sample=sample, aliases=aliases, purpose=purpose,
-                required=list(inputs) if required is None else required)
+                required=list(inputs) if required is None else required,
+                response_mode=response_mode, component=component)
 
 _PACKAGES = [
     _p("customer.search", "筛选与定位客户", 1, "Customer", "LOCATE",
@@ -157,7 +159,9 @@ def function_packages(domain_ref=None, *, three_layer=False):
             "input_schema": obj(p["inputs"], p["required"]), "output_schema": obj(p["outputs"]),
             "connector": {"kind": "fixture", "version": "3", "workflow_id": p["key"]},
             "effect": effect, "requires_confirmation": effect == "WRITE",
-            "presentation": {"component": "detail", "title": p["name"], "field_map": {key: key for key in p["outputs"]}},
+            "presentation": {"component": p["component"], "title": p["name"],
+                             "field_map": {key: key for key in p["outputs"]},
+                             "response_mode": p["response_mode"]},
             "positive_examples": [{"utterance": text, "arguments": p["sample"]} for text in utterances],
             "negative_examples": [{"utterance": "读取未授权真实客户或伪造审批结果", "arguments": {"_unexpected": True}}],
             "participant_roles": [{"role": "target", "type": entity, "required": True, "min_count": 1, "max_count": 1}],
@@ -165,6 +169,7 @@ def function_packages(domain_ref=None, *, three_layer=False):
             "compiler_version": "finite-json-v2" if domain_ref else "finite-json-v1", "domain_refs": [domain_ref] if domain_ref else []}
         if "markdown" in p["outputs"]:
             definition["presentation"]["files_field"] = "files"
+            definition["presentation"].update(component="markdown", response_mode="content", content_path="markdown")
         if three_layer and domain_ref:
             bindings, roles = {}, {"target": p["entity"]}
             optional_roles = set()

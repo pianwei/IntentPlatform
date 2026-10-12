@@ -1,4 +1,5 @@
 """The public-model exception is restricted to reviewed source-controlled fixtures."""
+from copy import deepcopy
 from .schemas import Definition
 from .demo.catalog import function_packages, domain_definition, action_definitions
 from .demo.skills import business_skill_templates
@@ -45,6 +46,26 @@ def assert_synthetic_snapshot(snapshot):
                         for p in packages(ref, three_layer=upgraded, **({} if is_zhiyu else {"include_extension": True})) if p["key"] == key]
             accepted += [{**value, "authoring_version": "function-v2"} for value in accepted]
         compared = Definition.model_validate(d).model_dump()
+        # Immutable synthetic releases from before the presentation policy was
+        # added remain eligible for the same reviewed model path. This accepts
+        # only the exact older generator shape, never a caller-authored variant.
+        original_presentation = d.get("presentation") or {}
+        if "response_mode" not in original_presentation and "content_path" not in original_presentation:
+            legacy = []
+            for value in accepted:
+                old = deepcopy(value)
+                old_presentation = old.get("presentation") or {}
+                old_presentation.pop("response_mode", None)
+                old_presentation.pop("content_path", None)
+                if old.get("execution_kind") == "composite" and is_zhiyu:
+                    old_presentation["component"] = "markdown"
+                elif "markdown" in (old.get("output_schema") or {}).get("properties", {}):
+                    old_presentation["component"] = "detail"
+                try:
+                    legacy.append(Definition.model_validate(old).model_dump())
+                except ValueError:
+                    continue
+            accepted.extend(legacy)
         # Server-approved result examples are not model input. Public cards never
         # receive them; no other author-owned text is exempted from this gate.
         compared["output_examples"] = []

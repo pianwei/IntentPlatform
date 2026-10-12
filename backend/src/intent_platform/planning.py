@@ -640,7 +640,8 @@ def _summarize(work, plan):
                         approved = project_output(step.definition, raw)[0]
                 except (OutputContractError, ValueError, TypeError):
                     approved = "结果不可展示"
-                rows.append({"step": step.step_key, "name": step.definition["name"], "data": approved})
+                rows.append({"capability_id": step.capability_id, "step": step.step_key,
+                             "name": step.definition["name"], "data": approved})
         if plan.snapshot.get("composite_function_id"):
             from .output_contract import project_output
             definition = next(c["definition"] for c in work["snapshot"]["capabilities"] if c["capability_id"] == plan.snapshot["composite_function_id"])
@@ -648,11 +649,17 @@ def _summarize(work, plan):
                 mapped = {field: (steps[ref["$step"]].result or {}).get("data") if ref["path"] == "data" else _path(steps[ref["$step"]].result, ref["path"])
                           for field, ref in plan.snapshot["final_output_mapping"].items() if steps[ref["$step"]].status == "SUCCEEDED"}
                 data = project_output(definition, mapped)[0]
-                rows = [{"name": definition["name"], "data": data}]
+                rows = [{"capability_id": plan.snapshot["composite_function_id"],
+                         "name": definition["name"], "data": data}]
             except (ValueError, TypeError, KeyError):
-                rows = [{"name": definition["name"], "data": "业务已完成，最终结果不符合展示契约"}]
+                rows = [{"capability_id": plan.snapshot["composite_function_id"],
+                         "name": definition["name"], "data": "业务已完成，最终结果不符合展示契约"}]
         if plan.snapshot.get("composite_groups"):
             rows = partial_result_rows(db, plan)
+    from .result_presentation import response_intro, response_mode_for_rows
+    mode = response_mode_for_rows(rows, work["snapshot"]["capabilities"])
+    if mode in {"structured", "content"}:
+        return response_intro(rows, mode)
     if work["snapshot"]["model_profile"].get("mode") == "fixture":
         if plan.snapshot.get("three_layer"):
             from .business_markdown import render_rows

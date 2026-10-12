@@ -28,5 +28,4 @@ def document_composite_definition(skill, skill_version_id, dependencies, domain_
     value = composite_definition(template, skill_version_id, dependencies, domain_ref)
     value["authoring_version"] = "function-v2"
     value["composite"].update(mode="document", final_output_mapping={})
-    value["presentation"]["component"] = "markdown"
     return value

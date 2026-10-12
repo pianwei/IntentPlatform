@@ -35,6 +35,14 @@ def test_install_idempotent_release_and_restricted_public_catalog(client, local,
         snapshot = db.get(Release, zhiyu['current_release_id']).snapshot
         from intent_platform.public_demo import assert_synthetic_snapshot
         assert_synthetic_snapshot(snapshot)
+        legacy = deepcopy(snapshot)
+        for item in legacy['capabilities']:
+            definition = item['definition']
+            presentation = definition.get('presentation', {})
+            presentation.pop('response_mode', None); presentation.pop('content_path', None)
+            if definition.get('execution_kind') != 'composite' and 'markdown' in (definition.get('output_schema') or {}).get('properties', {}):
+                presentation['component'] = 'detail'
+        assert_synthetic_snapshot(legacy)
         tampered = deepcopy(snapshot); tampered['capabilities'][0]['definition']['description'] += ' arbitrary'
         with pytest.raises(ValueError): assert_synthetic_snapshot(tampered)
 

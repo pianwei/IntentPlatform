@@ -162,13 +162,19 @@ def _draft(state, args, kind):
             raise BusinessFailure("SOURCE_FACTS_MISMATCH")
     if kind == "brief":
         title = row["name"] + "访前一页纸（模拟草稿）"
-        body = f"## 客户事实\n{profile}\n{cooperation}\n## 沟通事项\n核对近期经营变化与服务需求；确认下次资料交接安排。"
+        body = (f"## 客户事实\n{profile}\n{cooperation}\n## 沟通事项\n核对近期经营变化与服务需求；确认下次资料交接安排。"
+                f"\n\n## 缺失材料\n{facts['missing_materials']}")
     elif kind == "minutes":
         title = row["name"] + "拜访纪要（模拟草稿）"
         body = "## 客户经理提供的记录（未经核实）\n" + args["transcript"] + "\n## 待复核\n拜访时间、参与人员、约定事项及责任人待客户经理确认。"
     else:
         title = row["name"] + "尽调报告（模拟草稿）"
         body = "## 已有资料\n" + facts["facts_text"] + "\n## 缺失材料\n" + facts["missing_materials"] + "\n## 结论边界\n本草稿仅整理资料，不形成真实尽调结论、审批意见或授信决定。"
+    if kind in {"brief", "diligence"}:
+        sources = "\n".join(f"- {item['title']}（版本 {item['version']}，来源编号 {item['source_id']}，模拟资料）"
+                            for item in facts["citations"])
+        if sources:
+            body += "\n\n## 资料来源\n" + sources
     markdown = "# " + title + "\n\n" + body
     return {"customer_id": cid, "title": title, "markdown": markdown,
             "draft_only": True, "missing_materials": facts["missing_materials"], "citations": facts["citations"],

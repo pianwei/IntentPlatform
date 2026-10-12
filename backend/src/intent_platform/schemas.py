@@ -46,6 +46,8 @@ class Presentation(StrictModel):
     title: str = "结果"
     field_map: dict[str, str] = Field(default_factory=dict)
     files_field: str | None = None
+    response_mode: Literal["structured", "summary", "content"] = "structured"
+    content_path: str | None = None
 
 
 class Definition(StrictModel):
@@ -80,6 +82,54 @@ class Definition(StrictModel):
     parameter_semantics: dict[str, dict] = Field(default_factory=dict)
     trusted_preconditions: dict | None = None
     result_bindings: list[dict] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_response_mode(cls, value):
+        if not isinstance(value, dict):
+            return value
+        raw_presentation = value.get("presentation")
+        if raw_presentation is not None and not isinstance(raw_presentation, dict):
+            return value
+        presentation = dict(raw_presentation or {})
+        if "response_mode" in presentation:
+            return value
+        schema = value.get("output_schema") or {}
+
+        def markdown_paths(node, prefix=()):
+            if not isinstance(node, dict) or node.get("type") != "object":
+                return []
+            paths = []
+            for name, child in node.get("properties", {}).items():
+                path = (*prefix, name)
+                if name == "markdown" and isinstance(child, dict) and child.get("type") == "string":
+                    paths.append(".".join(path))
+                elif isinstance(child, dict) and child.get("type") == "object":
+                    paths.extend(markdown_paths(child, path))
+            return paths
+
+        markdown = markdown_paths(schema)
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        component = presentation.get("component", "detail")
+        if value.get("output_mode") == "none" or component == "table":
+            mode = "structured"
+        elif component == "markdown" and markdown:
+            mode = "content"
+        elif value.get("execution_kind", "direct") != "composite" and any(
+                isinstance(child, dict) and child.get("type") == "array"
+                and isinstance(child.get("items"), dict) and child["items"].get("type") == "object"
+                for child in properties.values()):
+            mode = "structured"
+        elif len(markdown) == 1:
+            mode = "content"
+        else:
+            mode = "summary"
+        presentation["response_mode"] = mode
+        if mode == "content" and len(markdown) == 1:
+            presentation.setdefault("content_path", markdown[0])
+        result = dict(value)
+        result["presentation"] = presentation
+        return result
 
     @model_validator(mode="after")
     def write_confirmation(self):

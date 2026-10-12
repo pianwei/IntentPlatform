@@ -94,6 +94,7 @@ def check_output_contract(definition):
         presentation = definition.get("presentation") or {}
         if (schema.get("properties") or schema.get("required") or schema.get("additionalProperties") is not False
                 or presentation.get("field_map") or presentation.get("files_field") is not None
+                or presentation.get("content_path") is not None or presentation.get("response_mode", "structured") != "structured"
                 or definition.get("result_bindings") or (definition.get("composite") or {}).get("final_output_mapping")):
             raise ValueError("No-output functions require a closed empty schema and no result, file or composite mappings")
         return schema
@@ -113,6 +114,22 @@ def check_output_contract(definition):
     files_field = presentation.get("files_field")
     if files_field is not None and (files_field != "files" or files_field in props):
         raise ValueError("Only a separately approved inline files field is supported")
+    response_mode = presentation.get("response_mode", "structured")
+    content_path = presentation.get("content_path")
+    if response_mode not in {"structured", "summary", "content"}:
+        raise ValueError("Choose one approved business response mode")
+    if response_mode == "content":
+        if not isinstance(content_path, str) or not content_path or presentation.get("component") not in {"markdown", "text"}:
+            raise ValueError("Content responses require a Markdown/text component and an approved string field")
+        current = schema
+        for part in content_path.split("."):
+            if not isinstance(current, dict) or current.get("type") != "object" or part not in current.get("properties", {}):
+                raise ValueError("Content path must select a declared output field")
+            current = current["properties"][part]
+        if not isinstance(current, dict) or current.get("type") != "string":
+            raise ValueError("Content path must select a declared string field")
+    elif content_path is not None:
+        raise ValueError("Content paths are only valid for content responses")
     if not props and files_field is None:
         raise ValueError("Approve at least one display field or the inline files boundary")
     bindings = definition.get("result_bindings", [])

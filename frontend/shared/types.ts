@@ -73,6 +73,8 @@ export type FunctionDefinition = {
     title: string;
     field_map: Record<string, string>;
     files_field?: string | null;
+    response_mode?: "structured" | "summary" | "content";
+    content_path?: string | null;
   };
   positive_examples: Record<string, unknown>[];
   negative_examples: Record<string, unknown>[];

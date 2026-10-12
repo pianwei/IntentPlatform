@@ -4,6 +4,8 @@
 
 核对日期：2026-10-12。这里记录可复用事实与来源，任务进度以 [TASKS.md](TASKS.md) 为准。
 
+2026-10-12用户确认：每个功能需明确选择结构化结果、Schema中指定的文本/Markdown字段，或模型归纳之一；运行端只显示所选路径，不把嵌套API包装对象直接转成JSON，也不与结构化卡片重复展示。旧不可变发布按原Schema/组件有限推断。实现与验证只查INT-033。
+
 ## 来源与适用关系
 
 2026-10-10后续要求组合编辑渐进展示：默认只显示已选子功能，添加时搜索并确认；Skill提供文档模板及编辑/预览，已有说明不静默覆盖。模板只是草稿辅助，执行、发布与权限契约不变；状态见INT-030。
@@ -32,7 +34,7 @@
 | 项目位置 | 本文件所在项目根目录，当前为 `D:/pianwei/work/intent` | 移动目录后使用相对路径，不固化个人机器路径到技能 |
 | 工程阶段 | 已开始本地 API、Worker、双前端与 PostgreSQL 实现；真实资源联调尚缺条件 | 实测和未完成范围见 TASKS 引用证据 |
 | 代码、依赖、运行命令 | backend/requirements.txt、constraints.txt、pyproject.toml；frontend/package.json、package-lock.json；Compose 与 scripts/dev.ps1 | 实际变更时同步 TESTING 和运行手册 |
-| Git、远程、分支、CI | 本地`main`已推送至`origin/main`，当前包含本轮`5ef732c`；GitHub远程仓库为`pianwei/IntentPlatform`，既有`codex/INT-017-local-candidate`功能分支保留。分支保护与CI状态未验证 | 直接推送仅在用户明确授权时进行；本次未创建PR、未部署生产，本地交付不等于生产发布 |
+| Git、远程、分支、CI | GitHub远程仓库为`pianwei/IntentPlatform`；当前主分支及交付提交以[TASKS](TASKS.md)和Git历史为准，既有`codex/INT-017-local-candidate`功能分支保留。分支保护与CI状态未验证 | 直接推送仅在用户明确授权时进行；本次未创建PR、未部署生产，本地交付不等于生产发布 |
 | 技术方向 | FastAPI/Pydantic/HTTPX、SQLAlchemy/Alembic、PostgreSQL，API/Worker 同库；React/TypeScript 双前端及 assistant-ui | 版本以锁定清单为准；内网兼容仍需实际验证 |
 | 应用入口 | 同一域名下`/console/`、`/chat/{public_id}`、`/embed/{public_id}`；本地默认5173，两个前端保持独立构建与权限边界 | 外观、渠道与嵌入在Console配置发布；不以增加智能体为由新增服务，见DEC-012/013 |
 | 当前产品结构 | 空间功能库支持直接/单层组合功能；智能体发布生成专属实体、动力、策划投影，运行采用`three-layer-v1`；历史策略保留 | 新发布固定依赖与提示修订，修改草稿不改旧会话；当前验证对象见INT-019记录 |
