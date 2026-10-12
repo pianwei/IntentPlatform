@@ -11,6 +11,7 @@ export class ApiError extends Error {
 }
 export class ApiClient {
   private token: string | null = null;
+  private renewal: Promise<boolean> | null = null;
   constructor(
     private scope: "management" | "runtime",
     private onExpired?: () => void,
@@ -21,7 +22,7 @@ export class ApiClient {
   clear() {
     this.token = null;
   }
-  private async response(path: string, options: RequestInit = {}): Promise<Response> {
+  private async response(path: string, options: RequestInit = {}, retried = false): Promise<Response> {
     if (
       (!path.startsWith("/api/v2/") && path !== "/health") ||
       path.includes("\\")
@@ -41,10 +42,14 @@ export class ApiClient {
     const response = await fetch(path, {
       ...options,
       headers,
-      credentials: "omit",
+      credentials: this.scope === "management" && pathname.startsWith("/api/v2/auth/") ? "same-origin" : "omit",
       cache: "no-store",
     });
     if (!response.ok) {
+      if (response.status === 401 && this.scope === "management" && !retried && !pathname.startsWith("/api/v2/auth/")) {
+        if (!this.renewal) this.renewal = this.renew().finally(() => { this.renewal = null; });
+        if (await this.renewal) return this.response(path, options, true);
+      }
       const data = await response.json().catch(() => null);
       if (response.status === 401) {
         this.clear();
@@ -61,6 +66,15 @@ export class ApiClient {
       );
     }
     return response;
+  }
+  private async renew(): Promise<boolean> {
+    try {
+      const response = await fetch("/api/v2/auth/refresh", { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json" }, body: "{}" });
+      if (!response.ok) return false;
+      const value = await response.json();
+      if (typeof value.access_token !== "string") return false;
+      this.token = value.access_token; return true;
+    } catch { return false; }
   }
   async request<T>(path: string, options: RequestInit = {}): Promise<T> {
     return (await this.response(path, options)).json() as Promise<T>;

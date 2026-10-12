@@ -15,6 +15,23 @@ router = APIRouter()
 BASE = "/api/v2/management/workspaces/{ws}"
 
 
+@router.get(BASE + "/function-options")
+def function_options(ws: str, token=Depends(authenticate), db: Session = Depends(session)):
+    manager(db, token, ws)
+    from .function_authoring import options
+    return options(db, ws)
+
+
+@router.post(BASE + "/function-options/bootstrap")
+def bootstrap_function_options(ws: str, token=Depends(authenticate), db: Session = Depends(session)):
+    manager(db, token, ws)
+    from .function_authoring import bootstrap
+    value = bootstrap(db, ws, token.user_id)
+    audit(db, token.user_id, ws, "function.defaults", ws)
+    db.commit()
+    return value
+
+
 class ActionBody(StrictModel):
     key: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,39}$")
     name: str = Field(min_length=1, max_length=80)
@@ -32,6 +49,7 @@ class SkillStepBody(StrictModel):
     capability_id: str | None = None
     capability_key: str | None = None
     arguments: dict = Field(default_factory=dict)
+    parameter_units: dict[str, str] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list, max_length=8)
     when: PlanCondition | None = None
     foreach: PlanForeach | None = None
@@ -44,12 +62,25 @@ class SkillStepBody(StrictModel):
 
 
 class SkillBody(StrictModel):
+    mode: str = Field(default="template", pattern=r"^(template|document)$")
+    document: str = Field(default="", max_length=24000)
     key: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,79}$")
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(min_length=1, max_length=4000)
     triggers: list[str] = Field(default_factory=list, max_length=40)
     input_fields: list[str] = Field(default_factory=list, max_length=20)
-    steps: list[SkillStepBody] = Field(min_length=1, max_length=8)
+    applicable_entities: list[str] = Field(default_factory=list, max_length=40)
+    applicable_actions: list[str] = Field(default_factory=list, max_length=40)
+    steps: list[SkillStepBody] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def authoring_mode(self):
+        if self.mode == "document":
+            if not self.document.strip() or self.steps:
+                raise ValueError("Document Skill requires Markdown and cannot contain fixed steps")
+        elif not self.steps or self.document:
+            raise ValueError("Template Skill requires fixed steps and cannot contain a document")
+        return self
 
 
 class SkillEdit(StrictModel):
@@ -129,6 +160,9 @@ def _skill_candidates(db, ws):
 
 
 def _validate_skill(db, ws, definition):
+    if definition.get("mode") == "document":
+        SkillBody.model_validate(definition)
+        return True
     candidates = _skill_candidates(db, ws)
     by_key = {c["definition"]["connector"].get("workflow_id"): c for c in candidates
               if c["definition"]["connector"].get("workflow_id")}
@@ -192,3 +226,78 @@ def disable_skill(ws: str, skill_id: str, token=Depends(authenticate), db: Sessi
     item.disabled = True
     audit(db, token.user_id, ws, "business_skill.disable", item.id)
     value = _skill_view(item); db.commit(); return value
+
+
+@router.get(BASE + "/business-skills/{skill_id}/versions")
+def skill_versions(ws: str, skill_id: str, token=Depends(authenticate), db: Session = Depends(session)):
+    manager(db, token, ws)
+    return [{"id": v.id, "skill_id": v.skill_id, "version": v.version, "definition": v.definition}
+            for v in db.scalars(select(BusinessSkillVersion).where(BusinessSkillVersion.workspace_id == ws,
+                               BusinessSkillVersion.skill_id == skill_id).order_by(BusinessSkillVersion.version.desc()))]
+
+
+@router.post(BASE + "/functions/{fid}/output-examples")
+def save_output_example(ws: str, fid: str, body: Revision, token=Depends(authenticate), db: Session = Depends(session)):
+    from copy import deepcopy
+    from .services import get_resource, function_view
+    manager(db, token, ws)
+    item = get_resource(db, Function, fid, ws, lock=True)
+    from .authoring_tests import test_result
+    tested = test_result(db, item, token)
+    if item.revision != body.revision or tested.get("revision") != item.revision or not tested.get("passed") or not isinstance(tested.get("data"), dict):
+        raise HTTPException(409, "Save an example from a successful execution test of the current revision")
+    from .services import _display_value
+    data = _display_value(deepcopy(tested["data"]), max_depth=6)
+    def no_file_bytes(value):
+        if isinstance(value, list): return [no_file_bytes(item) for item in value]
+        if isinstance(value, dict):
+            return {key: no_file_bytes(item) for key, item in value.items()
+                    if key.lower() not in {"content_base64", "base64", "file_bytes", "raw_bytes", "binary", "bytes", "inline_files"}}
+        return value
+    data = no_file_bytes(data)
+    examples = list(item.definition.get("output_examples", []))
+    if data not in examples:
+        examples = [*examples, data][-5:]
+    item.definition = {**item.definition, "output_examples": examples}
+    audit(db, token.user_id, ws, "function.example.save", fid, {"revision": item.revision})
+    value = function_view(item); db.commit(); return value
+
+
+@router.get(BASE + "/functions/{fid}/execution-test")
+def function_execution_test(ws: str, fid: str, failure: bool = False, token=Depends(authenticate), db: Session = Depends(session)):
+    from .services import get_resource
+    from .authoring_tests import test_result
+    manager(db, token, ws)
+    return test_result(db, get_resource(db, Function, fid, ws), token, evidence_key="failure_execution_test" if failure else "execution_test")
+
+
+class TestConfirmation(StrictModel):
+    run_id: str
+    revision: int = Field(ge=1)
+    confirmed: bool
+
+
+@router.post(BASE + "/functions/{fid}/execution-test/confirmations")
+def confirm_execution_test(ws: str, fid: str, body: TestConfirmation, token=Depends(authenticate), db: Session = Depends(session)):
+    from .services import get_resource
+    from .authoring_tests import confirm_test
+    manager(db, token, ws)
+    return confirm_test(db, get_resource(db, Function, fid, ws, lock=True), token, body)
+
+
+@router.post(BASE + "/agents/{aid}/compile-preview")
+def compile_preview(ws: str, aid: str, body: Revision, token=Depends(authenticate), db: Session = Depends(session)):
+    from .models import Agent
+    from .services import get_resource
+    from .agent_projection import compile_agent, public_projection
+    manager(db, token, ws, "publisher")
+    agent = get_resource(db, Agent, aid, ws)
+    if agent.revision != body.revision:
+        raise HTTPException(409, "Agent draft revision changed")
+    try:
+        _, _, projection = compile_agent(db, agent, token.user_id)
+        return {"valid": True, "issues": [], "projection": public_projection(projection)}
+    except ValueError as exc:
+        return {"valid": False, "issues": [{"code": "COMPILATION_FAILED", "message": str(exc)}],
+                "projection": {"version": "agent-projection-v1", "entities": [], "actions": [], "skills": [],
+                               "explicit_function_ids": agent.capability_ids, "dependency_function_ids": []}}

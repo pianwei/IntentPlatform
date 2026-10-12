@@ -11,6 +11,11 @@ class Workspace(Base):
     __tablename__ = "workspaces"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str]
+    status: Mapped[str] = mapped_column(default="active")
+    revision: Mapped[int] = mapped_column(default=1)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by: Mapped[str | None]
+    access_epoch: Mapped[int] = mapped_column(default=0)
 
 
 class Membership(Base):
@@ -35,6 +40,9 @@ class AuthToken(Base):
     delegation: Mapped[dict] = mapped_column(JSONB, default=dict)
     parent_token_id: Mapped[str | None]
     runtime_session_id: Mapped[str | None] = mapped_column(ForeignKey("runtime_sessions.id"))
+    auth_method: Mapped[str] = mapped_column(default="legacy")
+    credential_version: Mapped[int | None]
+    source_key_id: Mapped[str | None]
 
 
 class Function(Base):
@@ -68,6 +76,7 @@ class FunctionVersion(Base):
 
 class Agent(Base):
     __tablename__ = "agents"
+    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_agent_workspace_name"),)
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("agent"))
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     name: Mapped[str]
@@ -83,11 +92,13 @@ class Agent(Base):
     runtime_ui: Mapped[dict] = mapped_column(JSONB, default=dict)
     channels: Mapped[dict] = mapped_column(JSONB, default=lambda: {"chat": True, "embed": True})
     live_channels: Mapped[dict] = mapped_column(JSONB, default=lambda: {"chat": True, "embed": True})
-    integration_refs: Mapped[list] = mapped_column(JSONB, default=lambda: ["development"] if settings().allow_dev_auth and settings().env != "production" else [])
+    integration_refs: Mapped[list] = mapped_column(JSONB, default=lambda: ["local"] if settings().identity_mode == "local" else ["development"] if settings().allow_dev_auth and settings().env != "production" else [])
     revoked_integration_refs: Mapped[list] = mapped_column(JSONB, default=list)
     planning_enabled: Mapped[bool] = mapped_column(default=False)
+    routing_strategy: Mapped[str] = mapped_column(default="legacy")
     business_skill_ids: Mapped[list] = mapped_column(JSONB, default=list)
     model_profile_id: Mapped[str | None] = mapped_column(ForeignKey("model_profiles.id"))
+    synthetic_catalog: Mapped[dict | None] = mapped_column(JSONB)
 
 
 class Release(Base):
@@ -180,6 +191,7 @@ class Conversation(Base):
     status: Mapped[str] = mapped_column(default="active")
     runtime_session_id: Mapped[str | None] = mapped_column(ForeignKey("runtime_sessions.id"), index=True)
     title: Mapped[str] = mapped_column(default="新会话")
+    business_context: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -301,6 +313,7 @@ class Handshake(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     agent_id: Mapped[str]
     workspace_id: Mapped[str]
+    workspace_epoch: Mapped[int] = mapped_column(default=0)
     host_origin: Mapped[str]
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -311,6 +324,7 @@ class Ticket(Base):
     user_id: Mapped[str]
     agent_id: Mapped[str]
     workspace_id: Mapped[str]
+    workspace_epoch: Mapped[int] = mapped_column(default=0)
     host_origin: Mapped[str]
     instance_nonce: Mapped[str]
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -318,6 +332,9 @@ class Ticket(Base):
     source_token_id: Mapped[str] = mapped_column(ForeignKey("auth_tokens.id"))
     runtime_session_id: Mapped[str | None]
     integration_id: Mapped[str | None]
+    source_key_id: Mapped[str | None]
+    key_version: Mapped[int | None]
+    visitor_id: Mapped[str | None]
 
 
 class Audit(Base):
@@ -372,6 +389,7 @@ class IngestJob(Base):
     __table_args__ = (UniqueConstraint("workspace_id", "created_by", "idempotency_key"),)
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("ingest"))
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    workspace_epoch: Mapped[int] = mapped_column(default=0)
     created_by: Mapped[str]
     token_id: Mapped[str]
     idempotency_key: Mapped[str]
@@ -401,6 +419,7 @@ class RuntimeSession(Base):
     __tablename__ = "runtime_sessions"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("session"))
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    workspace_epoch: Mapped[int] = mapped_column(default=0)
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"))
     user_id: Mapped[str] = mapped_column(index=True)
     channel: Mapped[str]
@@ -411,6 +430,22 @@ class RuntimeSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     integration_id: Mapped[str | None]
     identity_policy: Mapped[dict | None] = mapped_column(JSONB)
+    auth_method: Mapped[str] = mapped_column(default="legacy")
+    source_key_id: Mapped[str | None]
+    key_version: Mapped[int | None]
+    visitor_id: Mapped[str | None]
+    recovery_hash: Mapped[str | None]
+    demo_persona: Mapped[str | None]
+    demo_successor_id: Mapped[str | None]
+
+
+class SyntheticState(Base):
+    __tablename__ = "synthetic_states"
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), primary_key=True)
+    catalog_id: Mapped[str] = mapped_column(String, primary_key=True)
+    catalog_version: Mapped[int] = mapped_column(default=1)
+    state: Mapped[dict] = mapped_column(JSONB)
+    revision: Mapped[int] = mapped_column(default=1)
 
 
 class WorkspaceGovernance(Base):
@@ -481,3 +516,35 @@ class DomainVersion(Base):
     compiled: Mapped[dict] = mapped_column(JSONB)
     published_by: Mapped[str]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BusinessCatalogItem(Base):
+    __tablename__ = "business_catalog_items"
+    __table_args__ = (UniqueConstraint("workspace_id", "default_id"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("catalog"))
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    kind: Mapped[str]
+    key: Mapped[str]
+    definition: Mapped[dict] = mapped_column(JSONB)
+    revision: Mapped[int] = mapped_column(default=1)
+    latest_version: Mapped[int] = mapped_column(default=1)
+    origin: Mapped[str] = mapped_column(default="workspace")
+    default_id: Mapped[str | None] = mapped_column(ForeignKey("business_catalog_items.id"))
+    adopted_version: Mapped[int | None]
+    domain_package_id: Mapped[str | None] = mapped_column(ForeignKey("domain_packages.id"))
+    action_definition_id: Mapped[str | None] = mapped_column(ForeignKey("action_definitions.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BusinessCatalogVersion(Base):
+    __tablename__ = "business_catalog_versions"
+    __table_args__ = (UniqueConstraint("item_id", "version"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uid("catalogversion"))
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("business_catalog_items.id"))
+    version: Mapped[int]
+    definition: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+# Register identity tables in the same metadata without changing historical owners.
+from .identity_models import LocalAccount, LocalCredential, IntegrationKey, AnonymousPrincipal, IdentityAudit, LoginThrottle  # noqa: E402,F401

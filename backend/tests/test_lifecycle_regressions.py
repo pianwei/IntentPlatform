@@ -10,8 +10,10 @@ from conftest import conversation, message, drain
 
 
 def clone_agent(client, admin, seeded):
-    b = {"name": "Lifecycle fixture " + uuid.uuid4().hex[:6], "capability_ids": seeded["agent"]["capability_ids"], "allowed_origins": ["http://localhost:5173"]}
-    a = client.post("/api/v2/management/workspaces/ws-dev/agents", headers=admin, json=b).json()
+    b = {"name": "Lifecycle fixture " + uuid.uuid4().hex, "capability_ids": seeded["agent"]["capability_ids"], "allowed_origins": ["http://localhost:5173"]}
+    created = client.post("/api/v2/management/workspaces/ws-dev/agents", headers=admin, json=b)
+    assert created.status_code == 201, created.text
+    a = created.json()
     assert client.post(f"/api/v2/management/workspaces/ws-dev/agents/{a['id']}/publish", headers=admin).status_code == 200
     return a
 

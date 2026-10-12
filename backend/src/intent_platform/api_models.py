@@ -49,6 +49,8 @@ class WorkspaceOut(StrictModel):
 
 
 class TokenOut(StrictModel):
+    recovery_secret: str | None = None
+    demo_persona: str | None = None
     access_token: str
     token_type: Literal["bearer"] = "bearer"
     user_id: str
@@ -61,6 +63,12 @@ class TokenOut(StrictModel):
 
 
 class MeOut(StrictModel):
+    username: str | None = None
+    display_name: str | None = None
+    preferences: dict[str, str] = Field(default_factory=lambda: {"density": "comfortable"})
+    is_platform_admin: bool = False
+    must_change_password: bool = False
+    auth_method: str = "legacy"
     user_id: str
     scope: Literal["management", "runtime"]
     workspaces: list[WorkspaceOut]
@@ -73,6 +81,8 @@ class ValidationOut(StrictModel):
     errors: list[str]
     checks: dict[str, Any]
     probe: dict[str, Any] | None
+    execution_test: dict[str, Any] | None = None
+    failure_execution_test: dict[str, Any] | None = None
 
 
 class FunctionOut(StrictModel):
@@ -111,6 +121,7 @@ class AgentOut(StrictModel):
     published_integration_refs: list[str] | None
     revoked_integration_refs: list[str]
     planning_enabled: bool = False
+    routing_strategy: Literal["legacy", "three-layer-v1"] = "legacy"
     business_skill_ids: list[str] = Field(default_factory=list)
     model_profile_id: str | None = None
 
@@ -135,6 +146,8 @@ class ReleaseOut(StrictModel):
     agent_id: str
     release_id: str
     version: int
+    created_at: datetime | None = None
+    summary: dict = Field(default_factory=dict)
     capabilities: list[CapabilityVersionOut]
     fixture_mode: bool
 
@@ -156,6 +169,7 @@ class RuntimeAgentOut(StrictModel):
 
 
 class ConversationOut(StrictModel):
+    practice_active: bool = False
     id: str
     conversation_id: str
     agent_id: str
@@ -169,7 +183,7 @@ class ConversationOut(StrictModel):
 
 
 RunStatus = Literal["RECEIVED", "ROUTING", "WAITING_INPUT", "WAITING_CONFIRMATION", "EXECUTING", "SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"]
-Decision = Literal["READY", "NEEDS_ARGUMENTS", "AMBIGUOUS", "NEEDS_CONFIRMATION", "OUT_OF_SCOPE", "FORBIDDEN", "ERROR"]
+Decision = Literal["READY", "NEEDS_ARGUMENTS", "AMBIGUOUS", "NEEDS_CONFIRMATION", "OUT_OF_SCOPE", "FORBIDDEN", "ERROR", "MODEL_ANSWER"]
 
 
 class MessageOut(StrictModel):
@@ -186,6 +200,7 @@ class QuestionField(StrictModel):
     required: bool
     label: str | None = None
     unit: str | None = None
+    schema: dict[str, Any] | None = None
 
 
 class OptionOut(StrictModel):
@@ -260,6 +275,7 @@ class HandshakeOut(StrictModel):
 class TicketOut(StrictModel):
     ticket: str
     expires_at: datetime
+    runtime_session_id: str | None = None
 
 
 class SeedOut(StrictModel):
@@ -280,6 +296,7 @@ class PublicAppOut(StrictModel):
     runtime_ui: RuntimeUI
     channels: Channels
     fixture_mode: bool
+    synthetic_catalog: dict | None = None
 
 
 class HistoryMessage(StrictModel):

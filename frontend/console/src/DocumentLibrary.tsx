@@ -5,7 +5,7 @@ import { saveBlob, type DocumentSummary, type SourceDocument } from "../../share
 import { idempotencyKey, ingestBase, pollIngestJob, IngestJobFailedError, type IngestStatus, type IngestAccepted } from "../../shared/ingest";
 import "./SourceDocuments.css";
 
-export function DocumentLibrary({ api, workspace, writable, onSelect }: { api: ApiClient; workspace: string; writable: boolean; onSelect?: (document: SourceDocument) => void }) {
+export function DocumentLibrary({ api, workspace, writable, onSelect, onBusyChange, onDirtyChange }: { api: ApiClient; workspace: string; writable: boolean; onSelect?: (document: SourceDocument) => void; onBusyChange?: (busy: boolean) => void; onDirtyChange?: (dirty: boolean) => void }) {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [selected, setSelected] = useState("");
   const [versions, setVersions] = useState<SourceDocument[]>([]);
@@ -17,6 +17,9 @@ export function DocumentLibrary({ api, workspace, writable, onSelect }: { api: A
   const generation = useRef(0); const uploadInput = useRef<HTMLInputElement>(null);
   const uploadGeneration = useRef(0); const uploadAbort = useRef<AbortController | null>(null);
   const submission = useRef<{ file: File; revisionMode: boolean; selected: string; latest?: number; key: string } | null>(null);
+  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
+  useEffect(() => { onDirtyChange?.(!!file); }, [file, onDirtyChange]);
+  useEffect(() => () => { onBusyChange?.(false); onDirtyChange?.(false); }, [onBusyChange, onDirtyChange]);
   const base = `${management(workspace)}/documents`;
   async function reload() { setDocuments(await api.get<DocumentSummary[]>(base)); }
   useEffect(() => { void reload().catch(e => setError(errorText(e))); return () => { ++generation.current; ++uploadGeneration.current; uploadAbort.current?.abort(); }; }, [api, workspace]);

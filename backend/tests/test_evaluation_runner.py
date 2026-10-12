@@ -506,7 +506,9 @@ def fixture_application(client, admin, definition, *, http_probe=None):
         fid = app["capability_ids"][0]
     else:
         fid = publish_function(client, admin, definition)
-        app = client.post(ws + "/agents", headers=admin, json={"name": "Evaluation synthetic fixture", "capability_ids": [fid]}).json()
+        created = client.post(ws + "/agents", headers=admin, json={"name": "Evaluation synthetic fixture " + uuid.uuid4().hex[:12], "capability_ids": [fid]})
+        assert created.status_code == 201, created.text
+        app = created.json()
         response = client.post(ws + f"/agents/{app['id']}/publish", headers=admin)
         assert response.status_code == 200, response.text
     session = client.post(f"/api/v2/runtime/apps/{app['public_id']}/sessions", headers=admin, json={}).json()

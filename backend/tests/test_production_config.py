@@ -10,6 +10,7 @@ from intent_platform.production_preflight import validate_authority_catalogs, ve
 def production_values():
     return {
         "env": "production",
+        "identity_mode": "local",
         "allow_dev_auth": False,
         "model_mode": "openai",
         "database_url": "postgresql+psycopg://intent_app:private-app-test@db.bank.internal:5432/intent",
@@ -46,8 +47,7 @@ def test_production_config_accepts_only_explicit_safe_values():
 
 
 @pytest.mark.parametrize("field", [
-    "model_version", "model_api_key", "identity_service_key", "object_authorization_key",
-    "integrations_json", "membership_grants_json", "cors_origins", "allowed_hosts",
+    "model_version", "model_api_key", "object_authorization_key", "cors_origins", "allowed_hosts",
 ])
 def test_production_rejects_missing_required_values(field, monkeypatch):
     monkeypatch.delenv("INTENT_" + field.upper(), raising=False)
@@ -68,7 +68,7 @@ def test_production_rejects_missing_required_values(field, monkeypatch):
     {"allowed_hosts": "model.bank.internal,identity.bank.internal,object.bank.internal,8.8.8.8"},
     {"cors_origins": "http://localhost:5173"},
     {"cors_origins": "https://portal.bank.internal,*"},
-    {"integrations_json": "{}"}, {"membership_grants_json": "{}"},
+    {"identity_mode": "legacy-test"},
 ])
 def test_production_rejects_development_or_unapproved_configuration(change):
     with pytest.raises(ValidationError):
@@ -76,10 +76,19 @@ def test_production_rejects_development_or_unapproved_configuration(change):
 
 
 def test_preflight_checks_catalog_shape_without_echoing_secret_values():
-    cfg = production(integrations_json=json.dumps({"bank-portal": {"value": "sensitive-synthetic-example"}}))
+    cfg = production(credentials_json=json.dumps(["sensitive-synthetic-example"]))
     with pytest.raises(RuntimeError, match="catalogs are invalid") as exc:
         validate_authority_catalogs(cfg)
     assert "sensitive-synthetic-example" not in str(exc.value)
+
+
+def test_production_local_identity_does_not_require_retired_sso_configuration():
+    values = production_values()
+    for key in ("identity_introspection_url", "identity_service_key", "integrations_json", "membership_grants_json"):
+        values.pop(key)
+    cfg = Settings(_env_file=None, **values)
+    assert cfg.identity_mode == "local" and not cfg.allow_dev_auth
+    validate_authority_catalogs(cfg)
 
 
 def test_preflight_rejects_same_database_role(monkeypatch):

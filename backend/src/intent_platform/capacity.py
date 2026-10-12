@@ -25,13 +25,15 @@ def effective_limits(db, ws):
 
 
 def usage(db, ws):
-    active = list(db.scalars(select(ProcessingAttempt.kind).where(ProcessingAttempt.workspace_id == ws, ProcessingAttempt.status == "active", ProcessingAttempt.lease_until > now())))
+    counts = dict(db.execute(text("SELECT kind,total FROM intent_attempt_usage(:ws)"), {"ws": ws}).all())
     return {"queued_runs": db.execute(text("SELECT intent_queue_count(:ws)"), {"ws": ws}).scalar(),
-            "routing": active.count("routing"), "execution": sum(kind in {"execution", "reconciliation"} for kind in active)}
+            "routing": counts.get("routing", 0), "execution": counts.get("execution", 0)+counts.get("reconciliation", 0)}
 
 
 def admit(db, ws, excluding_conversation=None):
     lock_workspace(db, ws)
+    from .workspace_lifecycle import require_workspace
+    require_workspace(db, ws)
     pending = db.execute(text("SELECT intent_queue_count(:ws,:excluded)"), {"ws": ws, "excluded": excluding_conversation}).scalar()
     if pending >= effective_limits(db, ws)["max_queued_runs"]:
         raise HTTPException(429, "Workspace pending queue is full", headers={"Retry-After": "1"})

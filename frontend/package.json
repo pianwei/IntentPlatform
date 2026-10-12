@@ -7,6 +7,7 @@
     "dev:console": "vite --config console/vite.config.ts",
     "dev:agent": "vite --config agent-web/vite.config.ts",
     "typecheck": "tsc --noEmit",
+    "build:preview": "npm run typecheck && vite build --config preview/vite.config.ts",
     "build": "npm run typecheck && vite build --config console/vite.config.ts && vite build --config agent-web/vite.config.ts",
     "build:development": "npm run typecheck && vite build --mode development --config console/vite.config.ts && vite build --mode development --config agent-web/vite.config.ts",
     "test": "vitest run",
@@ -14,24 +15,34 @@
   },
   "dependencies": {
     "@assistant-ui/react": "0.10.49",
+    "@radix-ui/react-dialog": "1.1.15",
+    "@radix-ui/react-dropdown-menu": "2.1.16",
+    "@radix-ui/react-popover": "1.1.15",
+    "@radix-ui/react-tooltip": "1.2.8",
+    "lucide-react": "0.468.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "lucide-react": "0.468.0"
+    "react-router-dom": "7.18.4"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "6.6.3",
     "@testing-library/react": "16.1.0",
     "@testing-library/user-event": "14.5.2",
-    "@types/node": "20.17.10",
+    "@types/node": "22.15.30",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
-    "@vitejs/plugin-react": "4.3.4",
+    "@vitejs/plugin-react": "5.2.0",
     "jsdom": "25.0.1",
     "typescript": "5.6.3",
-    "vite": "5.4.21",
-    "vitest": "2.1.8"
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
   },
   "engines": {
-    "node": ">=20.10.0"
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "overrides": {
+    "@assistant-ui/react": {
+      "nanoid": "5.1.16"
+    }
   }
 }

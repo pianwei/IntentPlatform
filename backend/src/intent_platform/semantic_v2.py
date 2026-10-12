@@ -274,10 +274,13 @@ def compile_v2(definition, projection=None):
         if not registered or relation["source"] not in roles or relation["target"] not in roles or not subtype(roles[relation["source"]]["type"], registered["source_type"], projection) or not subtype(roles[relation["target"]]["type"], registered["target_type"], projection):
             raise ValueError("Unknown relation or incompatible declared role direction")
     properties = d["input_schema"].get("properties", {})
+    required_parameters = set(d["input_schema"].get("required", []))
     for name, binding in d["argument_bindings"].items():
         role = roles.get(binding["role"])
-        if not role or role["min_count"] != 1 or role["max_count"] != 1 or properties.get(name, {}).get("type") != "string":
-            raise ValueError("Entity bindings currently require one declared role and a scalar string parameter")
+        valid_cardinality = role and role["max_count"] == 1 and (role["min_count"] == 1 or
+            role["min_count"] == 0 and name not in required_parameters and role["required"] is False)
+        if not valid_cardinality or properties.get(name, {}).get("type") != "string":
+            raise ValueError("Entity bindings require one scalar string role; optional roles may bind only optional parameters")
     if len({b["role"] for b in d["argument_bindings"].values()}) != len(d["argument_bindings"]):
         raise ValueError("The finite binding contract supports one business-ID parameter per participant role")
     for name, spec in d["parameter_semantics"].items():
@@ -297,7 +300,11 @@ def compile_v2(definition, projection=None):
         raise ValueError("Result binding names must be distinct")
     if d["trusted_preconditions"] is not None:
         check_expression(d["trusted_preconditions"])
-    result = _compile_definition_v1(d)
+    if d.get("authoring_version") == "function-v2":
+        from .finite_inputs import compile_inputs
+        result = compile_inputs(d)
+    else:
+        result = _compile_definition_v1(d)
     proposal = {"action": d["action"], "object_type": d["object_type"], "result_type": d["result_type"], "negated": False,
                 "participants": [{"role": r["role"], "type": r["type"]} for r in roles.values() for _ in range(r["min_count"])], "relations": d["relations"]}
     cases = [proposal, {**proposal, "negated": True}, {**proposal, "action": "UNREGISTERED_ACTION"}, {**proposal, "object_type": "unknown:Object"}, {**proposal, "participants": []}]

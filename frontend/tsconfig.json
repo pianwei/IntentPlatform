@@ -12,5 +12,5 @@
     "resolveJsonModule": true,
     "types": ["vite/client", "vitest/globals", "node"]
   },
-  "include": ["console", "agent-web", "shared", "tests", "vitest.config.ts"]
+  "include": ["console", "agent-web", "preview", "shared", "tests", "vitest.config.ts"]
 }

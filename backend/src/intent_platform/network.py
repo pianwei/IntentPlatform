@@ -67,13 +67,13 @@ def request_model_json(url, *, payload, headers=None, timeout=10):
                          timeout=timeout, model_endpoint=True)
 
 
-def request_json_parts(method, url, *, params=None, json_body=None, headers=None, timeout=10):
+def request_json_parts(method, url, *, params=None, json_body=None, headers=None, timeout=10, allow_empty=False):
     """HTTP-v2 transport keeps URL parameters independent from a JSON body."""
     return _request_json(method, url, params=params, json_body=json_body, headers=headers,
-                         timeout=timeout, model_endpoint=False)
+                         timeout=timeout, model_endpoint=False, allow_empty=allow_empty)
 
 
-def _request_json(method, url, *, params, json_body, headers, timeout, model_endpoint):
+def _request_json(method, url, *, params, json_body, headers, timeout, model_endpoint, allow_empty=False):
     guard_transport_headers(headers)
     parsed, address = checked_url(url, model_endpoint=model_endpoint)
     pinned = httpx.URL(url).copy_with(host=address)
@@ -90,6 +90,8 @@ def _request_json(method, url, *, params, json_body, headers, timeout, model_end
                 # bounded response. Never attach an unbounded stream to the exception.
                 bounded = httpx.Response(response.status_code, content=body, request=response.request)
                 bounded.raise_for_status()
+            if allow_empty and response.status_code == 204 and not body:
+                return {}
             return httpx.Response(response.status_code, content=body, request=response.request).json()
 
 

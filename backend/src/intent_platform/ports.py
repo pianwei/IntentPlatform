@@ -183,22 +183,36 @@ def _execute_fixture_v2(definition, arguments, call_id, user_id, workspace_id, r
     connector_checks(definition, workspace_id)
     from .demo import execute, initial_state, reconcile, function_packages
     from .demo.engine import authorize_operation
-    from .models import DemoState
+    from .models import DemoState, Call, Run, Conversation
     from .db import engine, set_identity
     from sqlalchemy import select, text
     from sqlalchemy.orm import Session
     key = definition["connector"].get("workflow_id")
-    if key not in {package["key"] for package in function_packages()}:
+    if key not in {package["key"] for package in function_packages(include_extension=True)}:
         raise ValueError("Unknown synthetic operation")
     with Session(engine) as authority_db:
         set_identity(authority_db, user_id)
+        registered = authority_db.get(Call, call_id)
+        test_run = authority_db.get(Run, registered.run_id) if registered else None
+        test_conv = authority_db.get(Conversation, test_run.conversation_id) if test_run else None
+        private = bool(test_conv and (test_conv.business_context or {}).get("authoring_test"))
         authority_state = authority_db.get(DemoState, workspace_id)
-        authorize_operation(key, arguments, authority_state.state if authority_state else initial_state(), user_id)
+        data = (test_conv.business_context.get("authoring_demo_state") or initial_state()) if private else authority_state.state if authority_state else initial_state()
+        authorize_operation(key, arguments, data, user_id)
     if before_send:
         before_send()
     with Session(engine) as db, db.begin():
         set_identity(db, user_id)
         db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:workspace_id))"), {"workspace_id": workspace_id})
+        if private:
+            conv = db.scalar(select(Conversation).where(Conversation.id == test_conv.id).with_for_update())
+            data = conv.business_context.get("authoring_demo_state") or initial_state()
+            authorize_operation(key, arguments, data, user_id)
+            if reconcile_operation:
+                return reconcile(reconcile_operation, data)
+            envelope, changed = execute(key, arguments, data, call_id, user_id=user_id)
+            conv.business_context = {**conv.business_context, "authoring_demo_state": changed}
+            return envelope
         state = db.scalar(select(DemoState).where(DemoState.workspace_id == workspace_id).with_for_update())
         if state is None:
             state = DemoState(workspace_id=workspace_id, state=initial_state())
@@ -213,6 +227,63 @@ def _execute_fixture_v2(definition, arguments, call_id, user_id, workspace_id, r
 
 
 CONNECTOR_IMPLEMENTATIONS["fixture"]["2"] = _execute_fixture_v2
+
+
+def _execute_fixture_v3(definition, arguments, call_id, user_id, workspace_id, reconcile_operation=None, before_send=None):
+    """Registered Zhiyu operations with a server-bound per-session persona."""
+    connector_checks(definition, workspace_id)
+    from .zhiyu import execute, reconcile, authorize_operation, function_packages
+    from .models import SyntheticState, Call, Run, Membership, Conversation
+    from .synthetic_runtime import CATALOG_ID, persona_for_run, state_for_run
+    from .db import engine, set_identity
+    from sqlalchemy import select, text
+    from sqlalchemy.orm import Session
+    key = definition["connector"].get("workflow_id")
+    if key not in {p["key"] for p in function_packages()}:
+        raise ValueError("Unknown synthetic operation")
+    with Session(engine) as db:
+        set_identity(db, user_id)
+        call = db.get(Call, call_id)
+        if call:
+            run = db.get(Run, call.run_id)
+            persona = persona_for_run(db, run)
+            conv = db.get(Conversation, run.conversation_id)
+            private = bool((conv.business_context or {}).get("authoring_test"))
+            private_id = conv.id if private else None
+        else:
+            # Probe entrypoints are already manager-authorized. Still recheck the
+            # current membership here and use the narrow default persona.
+            membership = db.get(Membership, (user_id, workspace_id))
+            if not call_id.startswith("probe") or not membership or not membership.active or not set(membership.roles) & {"admin", "maintainer"}:
+                raise PermissionError("A registered call or authorized probe is required")
+            persona = "manager_a"
+            private = False; private_id = None
+        state = state_for_run(db, run) if call else db.get(SyntheticState, (workspace_id, CATALOG_ID)).state
+        authorize_operation(key, arguments, state, persona)
+    if before_send: before_send()
+    with Session(engine) as db, db.begin():
+        set_identity(db, user_id)
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": workspace_id + ":" + CATALOG_ID})
+        if private:
+            conv = db.scalar(select(Conversation).where(Conversation.id == private_id).with_for_update())
+            state = conv.business_context["authoring_synthetic_state"]
+            authorize_operation(key, arguments, state, persona)
+            if reconcile_operation:
+                return reconcile(reconcile_operation, state, persona_id=persona)
+            result, changed = execute(key, arguments, state, call_id, persona_id=persona)
+            conv.business_context = {**conv.business_context, "authoring_synthetic_state": changed}
+            return result
+        state = db.scalar(select(SyntheticState).where(SyntheticState.workspace_id == workspace_id,
+                          SyntheticState.catalog_id == CATALOG_ID).with_for_update())
+        authorize_operation(key, arguments, state.state, persona)
+        if reconcile_operation: return reconcile(reconcile_operation, state.state, persona_id=persona)
+        result, changed = execute(key, arguments, state.state, call_id, persona_id=persona)
+        if changed != state.state:
+            state.state = changed; state.revision += 1
+        return result
+
+
+CONNECTOR_IMPLEMENTATIONS["fixture"]["3"] = _execute_fixture_v3
 
 
 def execute_connector(definition, arguments, call_id, user_id, workspace_id, reconcile_operation=None, before_send=None):
@@ -245,6 +316,7 @@ ROUTING_PROMPTS["router-v3"] = PROMPT_V3
 ROUTING_PROMPTS["planner-v1"] = "Finite planner-v1 is handled by the persistent planning worker"
 ROUTING_PROMPTS["planner-v2"] = "Finite planner-v2 is handled by the persistent planning worker"
 ROUTING_PROMPTS["planner-v3"] = "Finite planner-v3 is handled by the persistent planning worker"
+ROUTING_PROMPTS["three-layer-v1"] = "Entity/action projection then applicable rules and finite planning"
 
 
 def route_model(text, candidates, answers=None, policy_version="router-v1", context=None):

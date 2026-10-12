@@ -1,776 +1,139 @@
-import { FunctionEditor } from "./FunctionEditor";
-import { DomainPage } from "./DomainPage";
-import { EvaluationArchiveViewer } from "./EvaluationArchiveViewer";
-import { DocumentLibrary } from "./DocumentLibrary";
-import { AgentEditor } from "./AgentEditor";
-import { GovernancePage } from "./GovernancePage";
-export { AgentEditor } from "./AgentEditor";
-import { appPath } from "../../shared/application";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type FormEvent,
-} from "react";
-import {
-  Activity,
-  ArrowLeft,
-  ArrowUpRight,
-  Blocks,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Code2,
-  FileText,
-  FolderOpen,
-  FlaskConical,
-  LayoutGrid,
-  LogOut,
-  Plus,
-  RefreshCw,
-  Search,
-  Settings2,
-  ShieldCheck,
-  Sparkles,
-  X,
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createMemoryRouter, RouterProvider, useBlocker, useInRouterContext, useLocation, useNavigate, type BlockerFunction } from "react-router-dom";
+import { Activity, ArrowRight, ArrowUpRight, Blocks, Bot, Building2, ChevronRight, LayoutGrid, List, LogOut, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, Settings2, ShieldCheck, UsersRound } from "lucide-react";
 import { ApiClient, errorText, management } from "../../shared/api";
-import { Badge, Busy, Empty, Login, Notice } from "../../shared/ui";
-import type {
-  Agent,
-  Capability,
-  FunctionDefinition,
-  Identity,
-  Release,
-  Validation,
-  Workspace,
-} from "../../shared/types";
-import { DEVELOPMENT_UI } from "../../shared/environment";
-import { EvaluationPage } from "./EvaluationPage";
-import { BusinessPlanningPage } from "./BusinessPlanningPage";
-import { ModelSettingsPage } from "./ModelSettingsPage";
+import { Busy, Empty, Notice } from "../../shared/ui";
+import type { Agent, Capability, FunctionOptions, Identity, Release, Workspace } from "../../shared/types";
+import type { SpaceSummary } from "../../shared/workspaces";
+import type { Profile } from "../../shared/accounts";
+import { appPath, canOpenPublishedChat } from "../../shared/application";
+import { SpaceDirectory, SpaceDetail } from "./SpaceManagement";
+import { FunctionEditor } from "./FunctionEditor";
+import { AgentEditor, clearAgentDrafts } from "./AgentEditor";
+export { AgentEditor } from "./AgentEditor";
+import { CreationFlow, type CreationKind, type CreationSession } from "./CreationFlow";
+import { textScale } from "../../shared/displayPreferences";
+import { ModelSettingsPage, ModelResourcePage, type ModelTest, type ModelProfile } from "./ModelSettingsPage";
 import { RunTracePage } from "./RunTracePage";
-
-const statusLabels: Record<string, string> = {
-  draft: "待完善",
-  validated: "已验证",
-  published: "已发布",
-  disabled: "已停用",
-};
-type Page = "functions" | "documents" | "domains" | "planning" | "models" | "runs" | "agents" | "evaluations" | "audit" | "readiness" | "governance";
-
-export function ConsoleApp() {
-  const [identity, setIdentity] = useState<Identity | null>(null);
-  const [expired, setExpired] = useState(false);
-  const api = useMemo(
-    () =>
-      new ApiClient("management", () => {
-        setIdentity(null);
-        setExpired(true);
-      }),
-    [],
-  );
-  if (!identity)
-    return (
-      <>
-        {expired && <Notice kind="error">会话已失效，请重新连接。</Notice>}
-        <Login
-          api={api}
-          onLogin={(value) => {
-            setIdentity(value);
-            setExpired(false);
-          }}
-        />
-      </>
-    );
-  return (
-    <ConsoleWorkspace
-      key={identity.user_id}
-      api={api}
-      identity={identity}
-      onLogout={async () => {
-        try {
-          await api.post("/api/v2/runtime/sessions/logout");
-        } finally {
-          api.clear();
-          setIdentity(null);
-        }
-      }}
-    />
-  );
+import { BusinessCatalogPage } from "./BusinessCatalogPage";
+import { LocalLogin } from "./LocalLogin";
+import { PersonalCenter } from "./PersonalCenter";
+import { AccountsPage } from "./AccountsPage";
+import { ActionMenu, Hint, Modal, PageTitle, SearchSelect, Status } from "./ModernUI";
+import { LivePreview } from "./LivePreview";
+const statusLabels:Record<string,string>={draft:'草稿',validated:'已验证',published:'已发布',disabled:'已停用'};
+function businessObjectLabel(type: string, entities: FunctionOptions["entities"]) {
+ const registered = entities.find(item => item.id === type)?.label;
+ if (registered) return registered;
+ const name = type.split(':').at(-1) || '';
+ const legacyLabels: Record<string, string> = { Customer:'客户',Account:'账户',Product:'产品',Task:'任务',Document:'文档',Department:'部门',Employee:'员工',Segment:'客群',Manager:'客户经理',Contact:'联络人',Policy:'授信政策',CreditFAQ:'授信流程问题',Todo:'待办',Performance:'业绩',MarketingTask:'营销任务',Visit:'客户拜访',Report:'尽调报告',PostLoan:'贷后事项',Roleplay:'陪练' };
+ return legacyLabels[name] || (/[\u3400-\u9fff]/.test(name) ? name : type ? '未登记对象' : '未设置');
 }
-export function ConsoleWorkspace({
-  api,
-  identity,
-  onLogout,
-}: {
-  api: ApiClient;
-  identity: Identity;
-  onLogout: () => Promise<void>;
-}) {
-  const [spaces, setSpaces] = useState<Workspace[]>([]);
-  const [workspace, setWorkspace] = useState("");
-  const [page, setPage] = useState<Page>("functions");
-  const [functions, setFunctions] = useState<Capability[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [audit, setAudit] = useState<unknown[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
-  const [search, setSearch] = useState("");
-  const [editor, setEditorState] = useState<Capability | "new" | null>(null);
-  const editorEpoch = useRef(0);
-  const editorGeneration = editorEpoch.current;
-  function setEditor(value: Capability | "new" | null) { ++editorEpoch.current; setEditorState(value); }
-  const [agentEditor, setAgentEditor] = useState<Agent | "new" | null>(null);
-  const [releases, setReleases] = useState<{
-    agent: Agent;
-    items: Release[];
-  } | null>(null);
-  const loadGeneration = useRef(0);
-  const currentWorkspace = useRef(workspace);
-  currentWorkspace.current = workspace;
-  const activeSpace = spaces.find((item) => item.id === workspace);
-  const canManage =
-    activeSpace?.roles.some((role) =>
-      ["admin", "maintainer", "publisher"].includes(role),
-    ) ?? false;
-  const reload = useCallback(async () => {
-    if (!workspace || currentWorkspace.current !== workspace) return;
-    const epoch = ++loadGeneration.current;
-    setBusy(true);
-    setError("");
-    try {
-      const [f, a] = await Promise.all([
-        api.get<Capability[]>(`${management(workspace)}/functions`),
-        api.get<Agent[]>(`${management(workspace)}/agents`),
-      ]);
-      if (
-        epoch !== loadGeneration.current ||
-        currentWorkspace.current !== workspace
-      )
-        return;
-      setFunctions(f);
-      setAgents(a);
-    } catch (e) {
-      if (
-        epoch === loadGeneration.current &&
-        currentWorkspace.current === workspace
-      )
-        setError(errorText(e));
-    } finally {
-      if (
-        epoch === loadGeneration.current &&
-        currentWorkspace.current === workspace
-      )
-        setBusy(false);
-    }
-  }, [api, workspace]);
-  useEffect(() => {
-    let active = true;
-    api
-      .get<Workspace[]>("/api/v2/management/workspaces")
-      .then((items) => {
-        if (active) {
-          setSpaces(items);
-          setWorkspace(items[0]?.id ?? "");
-        }
-      })
-      .catch((e) => active && setError(errorText(e)));
-    return () => {
-      active = false;
-    };
-  }, [api]);
-  useEffect(() => {
-    setFunctions([]);
-    setAgents([]);
-    setEditor(null);
-    setAgentEditor(null);
-    setReleases(null);
-    void reload();
-  }, [reload]);
-  useEffect(() => {
-    let active = true;
-    if (page === "audit" && workspace) {
-      setAudit([]);
-      api
-        .get<unknown[]>(`${management(workspace)}/audit`)
-        .then((items) => active && setAudit(items))
-        .catch((e) => active && setError(errorText(e)));
-    }
-    return () => {
-      active = false;
-    };
-  }, [api, page, workspace]);
-  async function action(fn: () => Promise<unknown>, message: string) {
-    setError("");
-    setSuccess("");
-    setBusy(true);
-    try {
-      await fn();
-      await reload();
-      setSuccess(message);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-  const filtered = functions.filter((item) =>
-    `${item.name} ${item.description}`
-      .toLowerCase()
-      .includes(search.toLowerCase()),
-  );
-  const titles: Record<Page, string> = {
-    functions: "功能目录",
-    domains: "领域管理",
-    planning: "业务动作与 Skills",
-    models: "模型配置",
-    runs: "运行日志",
-    documents: "来源文档",
-    agents: "场景智能体",
-    evaluations: "评测诊断",
-    audit: "操作审计",
-    readiness: "接入准备",
-    governance: "空间治理",
-  };
-  return (
-    <div className="console-layout">
-      <aside className="sidebar">
-        <a className="brand" href="/console/">
-          <span className="brand-icon">i</span>
-          <span>
-            意图中台<small>INTENT PLATFORM</small>
-          </span>
-        </a>
-        <div className="workspace-label">工作空间</div>
-        <div className="workspace-switch">
-          <FolderOpen size={18} />
-          <select
-            aria-label="切换工作空间"
-            value={workspace}
-            onChange={(e) => setWorkspace(e.target.value)}
-          >
-            {spaces.map((space) => (
-              <option key={space.id} value={space.id}>
-                {space.name}
-              </option>
-            ))}
-          </select>
-          <ChevronDown size={14} />
-        </div>
-        <div className="nav-label">管理工作台</div>
-        <nav>
-          {(
-            [
-              { key: "functions", icon: Blocks, label: "功能目录" },
-              { key: "domains", icon: LayoutGrid, label: "领域管理" },
-              { key: "planning", icon: Blocks, label: "业务动作与 Skills" },
-              { key: "models", icon: Settings2, label: "模型配置" },
-              { key: "runs", icon: Activity, label: "运行日志" },
-              { key: "documents", icon: FileText, label: "来源文档" },
-              { key: "agents", icon: Sparkles, label: "场景智能体" },
-              { key: "evaluations", icon: FlaskConical, label: "评测诊断" },
-              { key: "audit", icon: Activity, label: "操作审计" },
-              { key: "governance", icon: Settings2, label: "空间治理" },
-              { key: "readiness", icon: ShieldCheck, label: "接入准备" },
-            ] as const
-          ).map((item) => (
-            <button
-              key={item.key}
-              className={page === item.key ? "active" : ""}
-              onClick={() => setPage(item.key)}
-            >
-              <item.icon size={19} />
-              {item.label}
-              {page === item.key && <ChevronRight size={15} />}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="environment">
-            <span className="status-dot" />
-            {identity.fixture_mode ? "本地开发环境" : "内网工作环境"}
-          </div>
-          <p>
-            权限边界由服务端校验
-            <br />
-            操作与发布保留审计记录
-          </p>
-          <button
-            onClick={() => void onLogout().catch((e) => setError(errorText(e)))}
-          >
-            <LogOut size={16} />
-            退出当前身份
-          </button>
-        </div>
-      </aside>
-      <div className="console-main">
-        <header className="topbar">
-          <div>
-            工作台 <ChevronRight size={14} /> <strong>{titles[page]}</strong>
-          </div>
-          <div className="user-chip">
-            <span className="avatar">{identity.user_id[0].toUpperCase()}</span>
-            {identity.user_id}
-            <Badge>{activeSpace?.roles.join(" · ") || "权限待确认"}</Badge>
-          </div>
-        </header>
-        <main className="content">
-          <div className="page-heading">
-            <div>
-              <div className="eyebrow">WORKSPACE / {workspace || "未选择"}</div>
-              <h1>{titles[page]}</h1>
-              <p>
-                {page === "functions"
-                  ? "把业务能力接入空间，确认映射，再验证和发布。"
-                  : page === "domains"
-                    ? "维护领域概念、关系和单位，发布可供功能精确绑定的不可变版本。"
-                    : page === "documents"
-                      ? "保留接口与业务资料的原文修订、章节和原始文件，追溯每一条引用。"
-                    : page === "planning"
-                      ? "将实体、动作和有限业务规则组合为可验证的任务链。"
-                    : page === "models"
-                      ? "配置获准模型地址与明确版本，测试连接及结构化输出。"
-                    : page === "runs"
-                      ? "按三层决策与业务步骤查看结构化运行事实。"
-                  : page === "agents"
-                    ? "组合已发布的业务功能，形成可独立运行和嵌入的智能体。"
-                    : page === "evaluations"
-                      ? "使用自行提供的用例诊断已发布智能体的功能路由，保留全部结果与分母。"
-                      : page === "audit"
-                        ? "查看当前空间的真实操作记录与版本变更。"
-                        : page === "governance"
-                          ? "管理空间成员、获准引用与运行限额，查看每次执行尝试的实际耗时。"
-                        : "明确真实接入与验收所需的材料、身份及环境。"}
-              </p>
-            </div>
-            <button
-              className="secondary"
-              disabled={busy || !workspace}
-              onClick={() => void reload()}
-            >
-              <RefreshCw size={16} />
-              刷新
-            </button>
-          </div>
-          {identity.fixture_mode && (
-            <Notice>
-              当前为本地开发。开发夹具用于验证接入与运行流程，不计入真实业务功能验收。
-            </Notice>
-          )}
-          {error && <Notice kind="error">{error}</Notice>}
-          {success && <Notice kind="success">{success}</Notice>}
-          {page === "documents" && workspace && <DocumentLibrary key={workspace} api={api} workspace={workspace} writable={canManage} />}
-          {page === "domains" && workspace && <DomainPage key={workspace} api={api} workspace={workspace} writable={canManage} publishable={!!activeSpace?.roles.some(r => ["admin", "publisher"].includes(r))} />}
-          {page === "planning" && workspace && <BusinessPlanningPage key={workspace} api={api} workspace={workspace} writable={canManage} publishable={!!activeSpace?.roles.some(r => ["admin", "publisher"].includes(r))} admin={!!activeSpace?.roles.includes("admin")} development={DEVELOPMENT_UI} onSeeded={reload} />}
-          {page === "models" && workspace && <ModelSettingsPage key={workspace} api={api} workspace={workspace} admin={!!activeSpace?.roles.includes("admin")} />}
-          {page === "runs" && workspace && <RunTracePage key={workspace} api={api} workspace={workspace} admin={!!activeSpace?.roles.includes("admin")} />}
-          {page === "governance" && workspace && <GovernancePage key={workspace} api={api} workspace={workspace} userId={identity.user_id} admin={!!activeSpace?.roles.includes("admin")} canManage={canManage} />}
-          {page === "functions" && (
-            <>
-              <div className="section-tabs">
-                <span className="selected">
-                  全部功能 <b>{functions.length}</b>
-                </span>
-                <span>
-                  已发布{" "}
-                  {functions.filter((f) => f.status === "published").length}
-                </span>
-                <span>
-                  待完善 {functions.filter((f) => f.status === "draft").length}
-                </span>
-              </div>
-              <section className="panel">
-                <div className="table-toolbar">
-                  <div className="search-input">
-                    <Search size={17} />
-                    <input
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      placeholder="搜索功能名称、业务描述"
-                      aria-label="搜索功能"
-                    />
-                  </div>
-                  <button
-                    className="primary"
-                    disabled={!canManage || !workspace}
-                    onClick={() => setEditor("new")}
-                  >
-                    <Plus size={17} />
-                    接入新功能
-                  </button>
-                </div>
-                {busy && functions.length === 0 ? (
-                  <Busy />
-                ) : filtered.length === 0 ? (
-                  <Empty
-                    title={
-                      functions.length
-                        ? "没有匹配的功能"
-                        : "从第一个真实业务功能开始"
-                    }
-                  >
-                    接入 HTTP、Dify 或 HiAgent 接口及说明，建立语义和执行映射。
-                  </Empty>
-                ) : (
-                  <div className="table-scroll">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>功能名称 / 描述</th>
-                          <th>接入方式</th>
-                          <th>运行边界</th>
-                          <th>状态</th>
-                          <th>版本</th>
-                          <th className="right">操作</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filtered.map((item) => (
-                          <tr key={item.id}>
-                            <td>
-                              <div className="table-title">
-                                <span className="table-icon">
-                                  <Blocks size={18} />
-                                </span>
-                                <div>
-                                  <strong>{item.name}</strong>
-                                  <p>{item.description || "暂无描述"}</p>
-                                  {item.is_fixture && (
-                                    <Badge tone="warning">开发夹具</Badge>
-                                  )}
-                                </div>
-                              </div>
-                            </td>
-                            <td>
-                              <Badge>
-                                {item.definition.connector.kind.toUpperCase()}
-                              </Badge>
-                            </td>
-                            <td>
-                              {item.definition.effect === "WRITE"
-                                ? "写操作 · 需确认"
-                                : "只读查询"}
-                            </td>
-                            <td>
-                              <Badge
-                                tone={
-                                  item.status === "published"
-                                    ? "success"
-                                    : item.status === "validated"
-                                      ? "info"
-                                      : "neutral"
-                                }
-                              >
-                                {statusLabels[item.status] || item.status}
-                              </Badge>
-                            </td>
-                            <td>
-                              {item.latest_version
-                                ? `v${item.latest_version}`
-                                : "未发布"}
-                              <small className="block muted">
-                                草稿 r{item.revision}
-                              </small>
-                            </td>
-                            <td className="right">
-                              <button
-                                className="text-button"
-                                onClick={() => setEditor(item)}
-                              >
-                                {canManage ? "管理映射" : "查看"}
-                                <ChevronRight size={14} />
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-                <footer className="table-footer">
-                  <span>{filtered.length} 个功能 · 数据来自当前空间</span>
-                  <span>发布以最新验证结果为准</span>
-                </footer>
-              </section>
-              <div className="help-strip">
-                <div className="help-icon">
-                  <FileText size={24} />
-                </div>
-                <div>
-                  <h3>让业务定义成为可验证的能力</h3>
-                  <p>接口说明 → 语义与动力映射 → 契约验证 → 不可变发布版本</p>
-                </div>
-                <button
-                  className="text-button"
-                  onClick={() => setPage("readiness")}
-                >
-                  查看接入准备
-                  <ArrowUpRight size={16} />
-                </button>
-              </div>
-            </>
-          )}
-          {page === "agents" && (
-            <>
-              <div className="table-toolbar">
-                <span className="muted">{agents.length} 个智能体</span>
-                <button
-                  className="primary"
-                  disabled={!canManage}
-                  onClick={() => setAgentEditor("new")}
-                >
-                  <Plus size={17} />
-                  创建智能体
-                </button>
-              </div>
-              <div className="agent-grid">
-                {agents.map((agent) => (
-                  <section className="panel agent-tile" key={agent.id}>
-                    <span className="agent-symbol">
-                      <Sparkles size={24} />
-                    </span>
-                    <Badge
-                      tone={agent.current_release_id ? "success" : "neutral"}
-                    >
-                      {agent.current_release_id ? "已有发布" : "草稿"}
-                    </Badge>
-                    <h2>{agent.name}</h2>
-                    <p>
-                      {agent.capability_ids?.length ?? 0} 个功能 ·{" "}
-                      {agent.fixture_mode ? "开发夹具组合" : "业务功能组合"}
-                    </p>
-                    <code>{agent.id}</code>
-                    <div className="agent-actions">
-                      <button
-                        className="secondary"
-                        disabled={!canManage}
-                        onClick={() => setAgentEditor(agent)}
-                      >
-                        编辑组合
-                      </button>
-                      <button
-                        className="secondary"
-                        onClick={() =>
-                          void api
-                            .get<Release[]>(
-                              `${management(workspace)}/agents/${agent.id}/releases`,
-                            )
-                            .then((items) => setReleases({ agent, items }))
-                            .catch((e) => setError(errorText(e)))
-                        }
-                      >
-                        版本
-                      </button>
-                      <button
-                        className="primary"
-                        disabled={!canManage || busy}
-                        onClick={() =>
-                          void action(
-                            () =>
-                              api.post(
-                                `${management(workspace)}/agents/${agent.id}/publish`,
-                                { revision: agent.revision },
-                              ),
-                            "智能体发布成功；新会话使用新版本。",
-                          )
-                        }
-                      >
-                        发布
-                      </button>
-                    </div>
-                    {agent.current_release_id && (
-                      <a
-                        className="text-button"
-                        href={appPath(agent.public_id ?? agent.id)}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        打开独立运行页 <ArrowUpRight size={15} />
-                      </a>
-                    )}
-                  </section>
-                ))}
-              </div>
-              {!agents.length && (
-                <Empty title="还没有场景智能体">
-                  先发布功能，再选择一组功能构建智能体。
-                </Empty>
-              )}
-            </>
-          )}
-          {page === "evaluations" && (
-            <>
-            <EvaluationPage
-              key={workspace}
-              api={api}
-              workspace={workspace}
-              agents={agents}
-              functions={functions}
-              writable={
-                activeSpace?.roles.some((role) =>
-                  ["admin", "publisher"].includes(role),
-                ) ?? false
-              }
-              fixtureMode={identity.fixture_mode}
-            />
-            <EvaluationArchiveViewer key={`archive-${workspace}`} />
-            </>
-          )}
-          {page === "audit" && (
-            <section className="panel audit-panel">
-              {audit.length ? (
-                <pre>{JSON.stringify(audit, null, 2)}</pre>
-              ) : (
-                <Empty title="暂无审计记录">
-                  当前空间的接入、验证与发布操作将在此留痕。
-                </Empty>
-              )}
-            </section>
-          )}
-          {page === "readiness" && (
-            <div className="readiness-grid">
-              {[
-                {
-                  title: "业务功能材料",
-                  text: "真实接口、业务用途、负责人、参数与成功/失败示例。开发夹具不替代真实功能。",
-                  icon: FileText,
-                },
-                {
-                  title: "语义与执行边界",
-                  text: "业务对象、动作、结果类型、字段来源、前置条件、只读或写操作、幂等与未知结果处置。",
-                  icon: Settings2,
-                },
-                {
-                  title: "身份与宿主",
-                  text: "SSO/可信身份、空间角色、允许的宿主 Origin、退出与权限撤销策略。",
-                  icon: ShieldCheck,
-                },
-                {
-                  title: "真实验证环境",
-                  text: "模型与硬件、真实测试 API、业务金标与封存评测集。当前开发诊断不等于验收。",
-                  icon: Activity,
-                },
-              ].map((item) => (
-                <section className="panel readiness-card" key={item.title}>
-                  <item.icon size={24} />
-                  <h2>{item.title}</h2>
-                  <p>{item.text}</p>
-                  <Badge tone="warning">按真实材料确认</Badge>
-                </section>
-              ))}
-              {DEVELOPMENT_UI && (
-                <section className="panel readiness-card dev-panel">
-                  <Code2 size={24} />
-                  <h2>本地流程验证夹具</h2>
-                  <p>
-                    显式创建两个开发功能及一个智能体，便于验证发布、补参和确认。不计入真实20功能。
-                  </p>
-                  <button
-                    className="secondary"
-                    disabled={!canManage || busy}
-                    onClick={() =>
-                      void action(
-                        () => api.post("/api/v2/dev/seed"),
-                        "开发夹具已准备，可在功能目录与场景智能体中查看。",
-                      )
-                    }
-                  >
-                    准备两个开发夹具
-                  </button>
-                  <a
-                    href="/console/dev-host.html"
-                    className="text-button"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    打开 iframe 联调宿主 <ArrowUpRight size={15} />
-                  </a>
-                </section>
-              )}
-            </div>
-          )}
-        </main>
-        <footer className="page-footer">
-          意图中台 · 自助接入 / 本体映射 / 可信执行<span>Console</span>
-        </footer>
-      </div>
-      {editor && (
-        <FunctionEditor
-          key={editor === "new" ? "new" : editor.id}
-          api={api}
-          workspace={workspace}
-          item={editor === "new" ? null : editor}
-          writable={canManage}
-          publishable={!!activeSpace?.roles.some(role => ["admin", "publisher"].includes(role))}
-          onClose={() => setEditor(null)}
-          onSaved={async (item) => {
-            if (editorEpoch.current !== editorGeneration || currentWorkspace.current !== workspace || item.workspace_id !== workspace) return;
-            setEditor(item);
-            await reload();
-          }}
-        />
-      )}
-      {agentEditor && (
-        <AgentEditor
-          api={api}
-          workspace={workspace}
-          item={agentEditor === "new" ? null : agentEditor}
-          functions={functions}
-          publishable={!!activeSpace?.roles.some(role => ["admin", "publisher"].includes(role))}
-          onClose={() => setAgentEditor(null)}
-          onSaved={async () => {
-            await reload();
-          }}
-        />
-      )}
-      {releases && (
-        <div className="modal-backdrop">
-          <section className="modal">
-            <div className="drawer-heading">
-              <h2>{releases.agent.name} · 发布版本</h2>
-              <button aria-label="关闭版本" onClick={() => setReleases(null)}>
-                <X size={20} />
-              </button>
-            </div>
-            {releases.items.length ? (
-              releases.items.map((release) => (
-                <div
-                  className="release-row"
-                  key={release.release_id || release.id}
-                >
-                  <div>
-                    <strong>v{release.version}</strong>
-                    <code>{release.release_id || release.id}</code>
-                    <small>{release.capabilities.length} 个功能版本</small>
-                  </div>
-                  <button
-                    className="secondary"
-                    disabled={!canManage || busy}
-                    onClick={() =>
-                      void action(
-                        () =>
-                          api.post(
-                            `${management(workspace)}/agents/${releases.agent.id}/rollback`,
-                            { release_id: release.release_id || release.id },
-                          ),
-                        "默认发布版本已切换；既有会话保持原版本。",
-                      )
-                    }
-                  >
-                    用于新会话
-                  </button>
-                </div>
-              ))
-            ) : (
-              <Empty title="暂无发布版本" />
-            )}
-          </section>
-        </div>
-      )}
-    </div>
-  );
+export function ConsoleApp(){
+ const [identity,setIdentity]=useState<Identity|null>(null),[loading,setLoading]=useState(true),[expired,setExpired]=useState(false);
+ const bootstrap=useRef<Promise<Identity>|null>(null);const api=useMemo(()=>new ApiClient('management',()=>{setIdentity(null);setExpired(true);}),[]);
+ useEffect(()=>{let active=true;if(!bootstrap.current)bootstrap.current=new ApiClient('management').post<Identity>('/api/v2/auth/refresh');bootstrap.current.then(v=>{if(active){api.setToken(v.access_token);setIdentity(v);setExpired(false);}}).catch(()=>{}).finally(()=>active&&setLoading(false));return()=>{active=false;};},[api]);
+ if(loading)return <Busy/>;if(!identity)return <>{expired&&<Notice kind="error">登录已失效，请重新登录。</Notice>}<LocalLogin api={api} onLogin={v=>{setIdentity(v);setExpired(false);}}/></>;
+ return <ConsoleWorkspace key={identity.user_id} api={api} identity={identity} onLogout={async()=>{try{await api.post('/api/v2/auth/logout');}finally{api.clear();setIdentity(null);}}}/>;
+}
+type Props={api:ApiClient;identity:Identity;onLogout:()=>Promise<void>};
+export function ConsoleWorkspace(props:Props){const routed=useInRouterContext();const [router]=useState(()=>!routed?createMemoryRouter([{path:'*',element:<WorkspaceShell {...props}/>}],{initialEntries:['/']}):null);return routed?<WorkspaceShell {...props}/>:<RouterProvider router={router!}/>;}
+function WorkspaceShell({api,identity,onLogout}:Props){
+ const actualLocation=useLocation(),navigate=useNavigate();
+ const [creation,setCreation]=useState<CreationSession|null>(()=>{const m=actualLocation.pathname.match(/^(\/spaces\/[^/]+)\/(agents|functions|models)\/new$/);return m?{key:Date.now(),kind:m[2]==='agents'?'agent':m[2]==='functions'?'function':'model',origin:`${m[1]}/${m[2]}`,expanded:true}:null;}),[creationDirty,setCreationDirty]=useState(false),[creationBusy,setCreationBusy]=useState(false),[modelTick,setModelTick]=useState(0);
+ const flowPath=useRef(actualLocation.pathname);
+ const [modelTests,setModelTests]=useState<Record<string,Record<string,ModelTest>>>({});
+ function recordModelTest(r:ModelTest){setModelTests(v=>({...v,[workspace]:{...v[workspace],[r.profile_id]:r}}));}
+ const origin=creation?.origin.split("?");
+ const location=origin?{...actualLocation,pathname:origin[0],search:origin[1]?"?"+origin[1]:""}:actualLocation;
+ const match=location.pathname.match(/^\/spaces\/([^/]+)\/(agents|functions|runs|settings|models|catalog)(?:\/([^/]+))?(?:\/([^/]+))?/);
+ const platform=location.pathname.startsWith('/platform/');
+ const section=platform?(location.pathname.includes('/accounts')?'accounts':location.pathname.includes('/business-catalog')?'catalog':'directory'):match?.[2]??'agents';
+ const [spaces,setSpaces]=useState<Workspace[]>([]),[lastSpace,setLastSpace]=useState(''),[loaded,setLoaded]=useState(false);
+ const workspace=match?decodeURIComponent(match[1]):lastSpace;
+ const object=match?.[3]?decodeURIComponent(match[3]):'';
+ const platformSpace=platform&&section==='directory'?location.pathname.split('/')[3]:undefined;
+ const [functions,setFunctions]=useState<Capability[]>([]),[agents,setAgents]=useState<Agent[]>([]),[busy,setBusy]=useState(false),[error,setError]=useState(''),[success,setSuccess]=useState('');
+ const [functionLabels,setFunctionLabels]=useState<{workspace:string;entities:FunctionOptions['entities']}|null>(null);
+ const [profile,setProfile]=useState<Profile|null>(null),[profileTab,setProfileTab]=useState<string|null>(null),[collapsed,setCollapsed]=useState(false),[mobileNav,setMobileNav]=useState(false);
+ const [dirtyState,setDirtyState]=useState({path:"",value:false}),[leaving,setLeaving]=useState<(()=>void)|null>(null);const bypass=useRef(false);
+ const pageDirty=dirtyState.path===location.pathname&&dirtyState.value;
+ const dirty=creation?creationDirty||creationBusy:pageDirty;
+ const setDirty=useCallback((value:boolean)=>setDirtyState({path:location.pathname,value}),[location.pathname]);
+ const blocker=useBlocker(useCallback<BlockerFunction>(({currentLocation,nextLocation})=>dirty&&!bypass.current&&currentLocation.pathname!==nextLocation.pathname,[dirty]));
+ useEffect(()=>()=>clearAgentDrafts(),[]);
+ useEffect(()=>{document.documentElement.style.setProperty("--text-scale",String(textScale[profile?.preferences?.text_size??"standard"]));return()=>{document.documentElement.style.removeProperty("--text-scale");};},[profile?.preferences?.text_size]);
+ useEffect(()=>{if(creation&&actualLocation.pathname!==flowPath.current){setCreation(null);setCreationDirty(false);setCreationBusy(false);}},[actualLocation.pathname]);
+ const [recentSpaces,setRecentSpaces]=useState<string[]>([]);
+ const [rollback,setRollback]=useState<{agent:Agent;release:Release}|null>(null);
+ const [releases,setReleases]=useState<{agent:Agent;items:Release[]}|null>(null),[preview,setPreview]=useState<Agent|null>(null);
+ const generation=useRef(0),content=useRef<HTMLElement>(null),positions=useRef<Record<string,number>>({});
+ const currentView=useRef(location.pathname); currentView.current=location.pathname;
+ const currentSpace=useRef(workspace); currentSpace.current=workspace;
+ const [spaceMeta,setSpaceMeta]=useState<SpaceSummary|null>(null),[spaceTick,setSpaceTick]=useState(0);
+ useEffect(()=>{let live=true;setSpaceMeta(null);if(workspace&&loaded)api.get<SpaceSummary>(management(workspace)).then(v=>{if(live&&v?.id===workspace)setSpaceMeta(v);}).catch(()=>{});return()=>{live=false;};},[api,workspace,loaded,spaceTick]);
+ const activeSpace=spaces.find(s=>s.id===workspace)??(spaceMeta?.id===workspace?spaceMeta:undefined),admin=!!activeSpace?.roles.includes('admin'),canManage=!!activeSpace?.roles.some(r=>['admin','maintainer','publisher'].includes(r)),publishable=!!activeSpace?.roles.some(r=>['admin','publisher'].includes(r));
+ const archived=spaceMeta?.status==='archived';
+ const canUseCatalog=admin||!!activeSpace?.roles.includes('maintainer');
+ const catalogWritable=admin||!!activeSpace?.roles.includes('maintainer')&&!!activeSpace?.roles.includes('publisher');
+ const canReadFunctionLabels=!!workspace&&loaded&&!platform&&!archived&&section==='functions'&&canManage;
+ useEffect(()=>{let live=true;setFunctionLabels(null);if(canReadFunctionLabels)api.get<FunctionOptions>(`${management(workspace)}/function-options`).then(value=>{if(live&&currentSpace.current===workspace)setFunctionLabels({workspace,entities:Array.isArray(value?.entities)?value.entities:[]});}).catch(()=>{});return()=>{live=false;};},[api,workspace,canReadFunctionLabels,spaceTick]);
+ const base=workspace?`/spaces/${encodeURIComponent(workspace)}`:'';
+ const params=new URLSearchParams(location.search),query=params.get('q')??'',filter=params.get('filter')??'all',grid=params.get('view')!=='list';
+ const listLocations=useRef<Record<string,string>>({});
+ if(!object&&(section==='agents'||section==='functions'))listLocations.current[`${workspace}:${section}`]=location.pathname+location.search;
+ function go(to:string,state?:unknown){setMobileNav(false);navigate(to,{state});}
+ function search(values:Record<string,string>){const next=new URLSearchParams(location.search);Object.entries(values).forEach(([k,v])=>v?next.set(k,v):next.delete(k));navigate({pathname:location.pathname,search:next.toString()},{replace:true});}
+ function flowNavigate(kind:CreationKind,id?:string,step?:number){const name=kind==='agent'?'agents':kind==='function'?'functions':'models';const path=`${base}/${name}/${id??'new'}`;flowPath.current=path;bypass.current=true;navigate(`${path}${step!==undefined?'?step='+step:''}`,{replace:true,state:{creation:true}});queueMicrotask(()=>{bypass.current=false;});}
+ function startCreation(kind:CreationKind,model?:ModelProfile|null){const name=kind==='agent'?'agents':kind==='function'?'functions':'models';flowPath.current=`${base}/${name}/${model?.id??'new'}`;setCreationDirty(false);setCreationBusy(false);setCreation({key:Date.now(),kind,origin:location.pathname+location.search,model,expanded:false});bypass.current=true;navigate(flowPath.current,{state:{creation:true}});queueMicrotask(()=>{bypass.current=false;});}
+ function closeCreation(selection?:{newFunctionId?:string;newModelId?:string}){const target=creation?.origin??`${base}/agents`;if(blocker.state==='blocked'){blocker.proceed();return;}bypass.current=true;navigate(target,{replace:true,state:selection});queueMicrotask(()=>{bypass.current=false;});}
+
+ useEffect(()=>{setError('');setSuccess('');const node=content.current;const key=location.pathname+location.search;if(node)node.scrollTop=positions.current[key]??0;return()=>{if(node)positions.current[key]=node.scrollTop;};},[location.pathname,location.search]);
+ useEffect(()=>{const leave=(e:BeforeUnloadEvent)=>{if(dirty){e.preventDefault();e.returnValue='';}};window.addEventListener('beforeunload',leave);return()=>window.removeEventListener('beforeunload',leave);},[dirty]);
+ const loadSpaces=useCallback(async()=>{const items=await api.get<Workspace[]>('/api/v2/management/workspaces');setSpaces(items);setLastSpace(old=>items.some(s=>s.id===old)?old:items[0]?.id??'');setLoaded(true);setSpaceTick(t=>t+1);},[api]);
+ useEffect(()=>{let live=true;void Promise.all([api.get<Profile>('/api/v2/me'),api.get<Workspace[]>('/api/v2/management/workspaces')]).then(([p,s])=>{if(live){setProfile(p?.user_id?p:null);setSpaces(s);setLastSpace(s[0]?.id??'');setLoaded(true);}}).catch(e=>live&&setError(errorText(e)));return()=>{live=false;};},[api]);
+ useEffect(()=>{if(loaded&&['/','/agents','/functions','/runs'].includes(location.pathname))navigate(workspace?`${base}/${location.pathname==='/'?'agents':location.pathname.slice(1)}`:'/platform/spaces',{replace:true});},[loaded,location.pathname,workspace,base,navigate]);
+ useEffect(()=>{if(match){setLastSpace(workspace);setRecentSpaces(ids=>[workspace,...ids.filter(id=>id!==workspace)].slice(0,5));}},[workspace]);
+ const reload=useCallback(async()=>{if(!workspace||platform||currentSpace.current!==workspace||spaceMeta?.status==='archived'||section==='settings'||(!spaces.some(s=>s.id===workspace)&&spaceMeta?.id!==workspace))return;const epoch=++generation.current;setBusy(true);try{const [f,a]=await Promise.all([api.get<Capability[]>(`${management(workspace)}/functions`),api.get<Agent[]>(`${management(workspace)}/agents`)]);if(epoch===generation.current){setFunctions(f);setAgents(a);}}catch(e){if(epoch===generation.current)setError(errorText(e));}finally{if(epoch===generation.current)setBusy(false);}},[api,workspace,platform,spaceMeta?.status,spaceMeta?.id,spaces,section==='settings']);
+ useEffect(()=>{setFunctions([]);setAgents([]);},[workspace,platform]);
+ useEffect(()=>{void reload();return()=>{generation.current++;};},[reload]);
+ const titles:Record<string,string>={agents:'智能体',functions:'功能库',runs:'运行日志',settings:'空间设置',models:'模型配置',catalog:'业务对象与动作',accounts:'账号管理',directory:'空间目录'};
+ const agent=object==='new'?null:agents.find(a=>a.id===object),fn=object==='new'?null:functions.find(f=>f.id===object);
+ const returnTo=(location.state as {returnTo?:string}|null)?.returnTo;
+ async function action(fn:()=>Promise<unknown>,message:string){setError('');setBusy(true);try{await fn();await reload();setSuccess(message);}catch(e){setError(errorText(e));}finally{setBusy(false);}}
+ const visibleAgents=agents.filter(a=>a.name.toLowerCase().includes(query.toLowerCase())&&(filter==='all'||(filter==='published'?!!a.current_release_id:!a.current_release_id)));
+ const visibleFunctions=functions.filter(f=>`${f.name} ${f.description}`.toLowerCase().includes(query.toLowerCase())&&(filter==='all'||(filter==='composite'?f.definition.execution_kind==='composite':f.definition.execution_kind!=='composite')));
+ return <div className={`console-modern ${collapsed?'nav-collapsed':''} ${profile?.preferences?.density==='compact'?'compact':''}`}>
+ {mobileNav&&<button className="nav-backdrop" aria-label="关闭导航" onClick={()=>setMobileNav(false)}/>}
+ <aside className={`sidebar ${mobileNav?'open':''}`}><div className="brand-row"><button className="brand" aria-label="意图中台首页" onClick={()=>go(`${base}/agents`)}><span className="brand-symbol"><Blocks size={19}/></span><strong>意图中台</strong></button><button className="icon-button collapse-nav" aria-label={collapsed?'展开侧栏':'收起侧栏'} onClick={()=>setCollapsed(!collapsed)}>{collapsed?<PanelLeftOpen size={16}/>:<PanelLeftClose size={16}/>}</button></div>
+ <div className="workspace-control"><SearchSelect label="切换工作空间" value={workspace} placeholder="选择空间" options={[...spaces].sort((a,b)=>(recentSpaces.includes(a.id)?recentSpaces.indexOf(a.id):99)-(recentSpaces.includes(b.id)?recentSpaces.indexOf(b.id):99)).map(s=>({value:s.id,label:s.name,detail:s.id===workspace?'当前空间':recentSpaces.includes(s.id)?'最近访问':undefined}))} onChange={id=>go(`/spaces/${encodeURIComponent(id)}/${["agents","functions","runs"].includes(section)?section:"agents"}`)} footer={workspace&&<div className="workspace-menu-links"><button onClick={()=>go(`${base}/settings`)}><Settings2 size={14}/>空间设置</button>{admin&&<button onClick={()=>go(`${base}/settings/members`)}><UsersRound size={14}/>成员</button>}</div>}/></div>
+ <nav className="primary-nav" aria-label="主要功能">{[{key:'agents',label:'智能体',icon:Bot},{key:'functions',label:'功能库',icon:Blocks},...(admin?[{key:'runs',label:'运行日志',icon:Activity}]:[])].map(n=><Hint text={n.label} key={n.key}><button className={section===n.key?'active':''} aria-current={section===n.key?'page':undefined} aria-label={n.label} onClick={()=>go(`${base}/${n.key}`)}><n.icon size={18}/><span>{n.label}</span></button></Hint>)}</nav>
+ <div className="sidebar-bottom">{admin&&<button className={section==='models'?'active':''} onClick={()=>go(`${base}/models`)}><Settings2 size={17}/><span>模型配置</span></button>}{(admin||profile?.is_platform_admin)&&<button className={section==='settings'?'active':''} onClick={()=>go(`${base}/settings`)}><Building2 size={17}/><span>空间设置</span></button>}{profile?.is_platform_admin&&<ActionMenu trigger={<button className={platform?'active':''}><ShieldCheck size={17}/><span>平台管理</span><ChevronRight size={13}/></button>} items={[{label:'空间目录',icon:<Building2 size={15}/>,onSelect:()=>go('/platform/spaces')},{label:'默认业务目录',icon:<Blocks size={15}/>,onSelect:()=>go('/platform/business-catalog')},{label:'账号管理',icon:<UsersRound size={15}/>,onSelect:()=>go('/platform/accounts')}]}/>}</div></aside>
+ <div className="main-shell"><header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-only" aria-label="展开导航" onClick={()=>setMobileNav(true)}><PanelLeftOpen size={18}/></button><button onClick={()=>go(platform?'/platform/spaces':`${base}/agents`)}>{platform?'平台管理':activeSpace?.name||'工作台'}</button><ChevronRight size={13}/><button onClick={()=>go(platform?'/platform/spaces':`${base}/${section}`)}>{titles[section]}</button>{object&&<><ChevronRight size={13}/><strong>{section==='agents'?(agent?.name||'新建智能体'):section==='functions'?(fn?.name||'新建功能'):section==='settings'?'成员':'会话详情'}</strong></>}</div><ActionMenu trigger={<button className="avatar-button" aria-label="打开用户菜单"><span className="avatar">{(profile?.display_name||profile?.username||'用')[0]}</span></button>} items={[{label:profile?.display_name||'当前用户',disabled:true,onSelect:()=>{}},{label:'个人中心',icon:<UsersRound size={15}/>,onSelect:()=>setProfileTab('资料')},{label:'我的 API Key',onSelect:()=>setProfileTab('API Key')},{label:'退出登录',icon:<LogOut size={15}/>,onSelect:()=>{if(dirty)setLeaving(()=>()=>void onLogout());else void onLogout();}}]}/></header>
+ <main ref={content} onScroll={e=>{positions.current[location.pathname+location.search]=e.currentTarget.scrollTop;}} className={`page-content ${section==='runs'?'log-content':''}`}>
+ <div hidden={!!creation?.expanded&&!archived&&canManage} className="resource-content">
+ {archived&& !['settings','runs','directory','accounts'].includes(section)&&<Empty title="空间已归档"><span>当前空间仅提供设置与获准的历史查询。</span><button className="button" onClick={()=>go(`${base}/settings`)}>空间设置</button>{admin&&<button className="button" onClick={()=>go(`${base}/runs`)}>查看运行历史</button>}</Empty>}
+ {error&&<Notice kind="error">{error}</Notice>}{success&&<Notice kind="success">{success}</Notice>}
+ {section==='directory'&&profile?.is_platform_admin&&(platformSpace?<><button className="back-link" onClick={()=>go('/platform/spaces')}>空间目录</button><SpaceDetail key={platformSpace} api={api} workspace={decodeURIComponent(platformSpace)} userId={identity.user_id} platformAdmin tab={location.pathname.split('/')[4]??'settings'} memberId={location.pathname.split('/')[5]} onChanged={loadSpaces} onNavigate={(t,id)=>go(t==='history'?`/spaces/${platformSpace}/runs`:`/platform/spaces/${platformSpace}/${t}${id?'/'+encodeURIComponent(id):''}`)}/></>:<SpaceDirectory api={api} onOpen={s=>go(`/platform/spaces/${encodeURIComponent(s.id)}`)} onChanged={loadSpaces}/>)}
+ {section==='settings'&&workspace&&<SpaceDetail key={workspace} api={api} workspace={workspace} userId={identity.user_id} platformAdmin={!!profile?.is_platform_admin} tab={object||'settings'} memberId={match?.[4]} onChanged={loadSpaces} onNavigate={(t,id)=>go(t==='history'?`${base}/runs`:`${base}/settings${t==='settings'?'':'/'+t}${id?'/'+encodeURIComponent(id):''}`)}/>}
+ {section==='accounts'&&profile?.is_platform_admin&&<><PageTitle title="账号管理"/><AccountsPage api={api}/></>}
+ {section==='catalog'&&platform&&profile?.is_platform_admin&&<BusinessCatalogPage api={api} writable={!!profile.is_platform_admin} admin onBack={()=>go('/platform/spaces')}/>}
+ {section==='catalog'&&!platform&&workspace&&canUseCatalog&&!archived&&<BusinessCatalogPage key={workspace} api={api} workspace={workspace} writable={catalogWritable} admin={admin} onBack={()=>go(`${base}/functions`)} onOpenFunction={id=>go(`${base}/functions/${encodeURIComponent(id)}?step=1`)}/>}
+ {section==='models'&&!archived&&admin&&!object&&<><PageTitle title="模型配置">{returnTo&&<button className="button" onClick={()=>go(returnTo)}>返回智能体</button>}</PageTitle><ModelSettingsPage externalTests={modelTests[workspace]??{}} key={workspace} refreshKey={modelTick} onOpen={model=>startCreation("model",model)} api={api} workspace={workspace} admin={admin} onDirtyChange={setDirty} onCreated={returnTo?model=>{bypass.current=true;setDirty(false);go(returnTo,{newModelId:model.id});queueMicrotask(()=>{bypass.current=false;});}:undefined}/></>}
+ {section==='models'&&!archived&&admin&&object&&<ModelResourcePage key={`${workspace}:${object}`} api={api} workspace={workspace} id={object} onDirtyChange={setDirty} onTest={recordModelTest} onClose={()=>go(`${base}/models`)} onSaved={value=>{if(object==='new'){bypass.current=true;navigate(`${base}/models/${value.id}`,{replace:true});queueMicrotask(()=>{bypass.current=false;});}}}/>}
+ {section==='runs'&&workspace&&<RunTracePage key={workspace} api={api} workspace={workspace} admin={admin} agents={agents} conversationId={object} onConversation={id=>go(`${base}/runs${id?'/'+encodeURIComponent(id):''}${location.search}`)} agentFilter={params.get('agent')??undefined} onAgent={archived?undefined:id=>go(`${base}/agents/${encodeURIComponent(id)}`)} onFunction={archived?undefined:name=>{const matches=functions.filter(f=>f.name===name);if(matches.length===1)go(`${base}/functions/${encodeURIComponent(matches[0].id)}?step=1`);else go(`${base}/functions?q=${encodeURIComponent(name)}`);}}/>}
+ {section==='agents'&&!archived&&object&&(agent||object==='new')&&<AgentEditor preserveMounted key={`${workspace}:${object}`} api={api} workspace={workspace} item={agent??null} functions={functions} admin={admin} publishable={publishable} onDirtyChange={setDirty} initialTab={params.get("tab")??undefined} onTabChange={tab=>search({tab})} onClose={()=>go(listLocations.current[`${workspace}:agents`]||`${base}/agents`)} onSaved={async saved=>{await reload();if(saved&&object==='new'&&currentView.current===location.pathname&&currentSpace.current===workspace){bypass.current=true;navigate(`${base}/agents/${saved.id}`,{replace:true});queueMicrotask(()=>{bypass.current=false;});}}} onCreateFunction={()=>startCreation("function")} onCreateModel={()=>startCreation("model")} onPreview={a=>setPreview(a)} onLogs={a=>go(`${base}/runs?agent=${a.id}`)} returnSelection={location.state as {newFunctionId?:string;newModelId?:string}|null}/>}
+ {section==='functions'&&!archived&&object&&(fn||object==='new')&&<FunctionEditor key={`${workspace}:${object}`} api={api} workspace={workspace} item={fn??null} functions={functions} writable={canManage} admin={admin} publishable={publishable} initialStep={Number(params.get("step"))||0} onStepChange={step=>search({step:String(step)})} onDirtyChange={setDirty} onClose={()=>go(returnTo||listLocations.current[`${workspace}:functions`]||`${base}/functions`,returnTo&&fn?.latest_version?{newFunctionId:fn.id}:undefined)} onSaved={async saved=>{if(currentView.current!==location.pathname||currentSpace.current!==workspace||saved.workspace_id!==workspace)return;await reload();if(currentView.current!==location.pathname)return;setDirty(false);if(returnTo&&saved.status==="published"){bypass.current=true;go(returnTo,{newFunctionId:saved.id});queueMicrotask(()=>{bypass.current=false;});}else if(object==='new'){bypass.current=true;navigate(`${base}/functions/${saved.id}?step=${params.get("step")??"0"}`,{replace:true,state:location.state});queueMicrotask(()=>{bypass.current=false;});}}}/>}
+ {object&&!archived&&(section==='agents'||section==='functions')&&!busy&&object!=='new'&&!agent&&!fn&&<Empty title="此对象不可用">请核对空间与访问权限。</Empty>}
+ {section==='agents'&&!archived&&!object&&<><PageTitle title="智能体"><button className="button primary" disabled={!canManage} onClick={()=>startCreation("agent")}><Plus size={15}/>新建智能体</button></PageTitle><div className="list-toolbar"><div className="filter-tabs">{[['all','全部'],['published','已发布'],['draft','草稿']].map(([v,l])=><button key={v} className={filter===v?'active':''} onClick={()=>search({filter:v})}>{l}<span>{agents.filter(a=>v==='all'||(v==='published'?!!a.current_release_id:!a.current_release_id)).length}</span></button>)}</div><div className="toolbar-right"><label className="search-box"><Search size={16}/><input aria-label="搜索智能体" placeholder="搜索智能体" value={query} onChange={e=>search({q:e.target.value})}/></label><div className="view-toggle"><button aria-label="卡片视图" aria-pressed={grid} onClick={()=>search({view:'grid'})}><LayoutGrid size={15}/></button><button aria-label="列表视图" aria-pressed={!grid} onClick={()=>search({view:'list'})}><List size={15}/></button></div><button className="icon-button" aria-label="刷新智能体" disabled={busy} onClick={()=>void reload()}><RefreshCw size={15}/></button></div></div>{busy&&!agents.length?<Busy/>:<div className={grid?'agent-grid':'agent-list'}>{visibleAgents.map(a=><article className="agent-card" key={a.id}><div className="agent-card-heading"><span className="agent-icon"><Bot size={22}/></span><ActionMenu trigger={<button className="icon-button" aria-label={`操作 ${a.name}`}><MoreHorizontal size={17}/></button>} items={[{label:'配置智能体',disabled:!canManage,onSelect:()=>go(`${base}/agents/${a.id}`)},{label:'查看运行日志',disabled:!admin,onSelect:()=>go(`${base}/runs?agent=${a.id}`)},{label:'发布版本',onSelect:()=>void api.get<Release[]>(`${management(workspace)}/agents/${a.id}/releases`).then(items=>setReleases({agent:a,items})).catch(e=>setError(errorText(e)))}]}/></div><button className="agent-title" disabled={!canManage} onClick={()=>go(`${base}/agents/${a.id}`)}>{a.name}</button><p className="agent-description">{a.runtime_ui?.description||'业务问答助手'}</p><div className="agent-stats"><span><Blocks size={14}/>{a.capability_ids?.length||0} 项功能</span><Status value={a.current_release_id?'已发布':'草稿'}/></div><footer><button className="text-button" disabled={!canOpenPublishedChat(a)} onClick={()=>setPreview(a)}>试聊已发布版本<ArrowRight size={14}/></button>{a.current_release_id&&!canOpenPublishedChat(a)&&<span className="muted small">聊天已关闭</span>}{canOpenPublishedChat(a)&&<a className="text-button" href={appPath(a.public_id??a.id)} target="_blank" rel="noreferrer">打开应用<ArrowUpRight size={14}/></a>}</footer></article>)}</div>}{!busy&&!visibleAgents.length&&<Empty title={agents.length?'没有匹配的智能体':'创建你的第一个智能体'}>选择业务功能，组合为统一的问答入口。</Empty>}<div className="collection-footer">共 {visibleAgents.length} 个智能体</div></>}
+ {section==='functions'&&!archived&&!object&&<><PageTitle title="功能库"><div className="button-row">{canUseCatalog&&<button className="button" onClick={()=>go(`${base}/catalog`)}><Blocks size={15}/>业务对象与动作</button>}<button className="button primary" disabled={!canManage} onClick={()=>startCreation("function")}><Plus size={15}/>新建功能</button></div></PageTitle><div className="list-toolbar"><div className="filter-tabs">{[['all','全部'],['direct','直接调用'],['composite','组合功能']].map(([v,l])=><button key={v} className={filter===v?'active':''} onClick={()=>search({filter:v})}>{l}</button>)}</div><label className="search-box"><Search size={16}/><input aria-label="搜索功能" placeholder="搜索功能名称、描述" value={query} onChange={e=>search({q:e.target.value})}/></label></div><div className="library-table"><table><thead><tr><th>功能名称</th><th>执行方式</th><th>业务对象</th><th>状态</th><th/></tr></thead><tbody>{visibleFunctions.map(f=><tr key={f.id}><td><button className="table-title" onClick={()=>go(`${base}/functions/${f.id}`)}><span className="object-icon"><Blocks size={16}/></span><span>{f.name}<small className="function-description">{f.description}</small></span></button></td><td>{f.definition.execution_kind==='composite'?'组合功能':({http:'HTTP 接口',dify:'Dify',hiagent:'HiAgent',fixture:'模拟功能'}[f.definition.connector.kind])}</td><td>{businessObjectLabel(f.definition.object_type,functionLabels?.workspace===workspace?functionLabels.entities:[])}</td><td><Status value={statusLabels[f.status]||f.status}/></td><td><button className="text-button" onClick={()=>go(`${base}/functions/${f.id}`)}>{canManage?'编辑':'查看'}<ArrowRight size={14}/></button></td></tr>)}</tbody></table>{!visibleFunctions.length&&(busy?<Busy/>:<Empty title="没有匹配的功能"/>)}</div><div className="collection-footer">共 {visibleFunctions.length} 项功能</div></>}
+ </div>
+ {creation&&!archived&&canManage&&<CreationFlow onModelTest={recordModelTest} key={creation.key} api={api} workspace={workspace} session={creation} functions={functions} admin={admin} publishable={publishable} exitRequested={blocker.state==='blocked'} onStay={()=>blocker.reset?.()} onClose={closeCreation} onDirtyChange={setCreationDirty} onBusyChange={setCreationBusy} onExpand={()=>setCreation(v=>v?{...v,expanded:true}:v)} onRoute={flowNavigate} onSaved={async()=>{setModelTick(v=>v+1);await reload();}} onAgent={a=>{setCreation(null);setCreationDirty(false);setCreationBusy(false);bypass.current=true;setAgents(items=>[...items.filter(x=>x.id!==a.id),a]);navigate(`${base}/agents/${a.id}`,{replace:true});queueMicrotask(()=>{bypass.current=false;});}}/>}
+ </main></div>
+ {profile&&profileTab&&<PersonalCenter api={api} profile={profile} onProfile={setProfile} initialTab={profileTab} onClose={()=>setProfileTab(null)} onPasswordChanged={()=>{api.clear();void onLogout();}}/>}
+ {!creation&&(blocker.state==='blocked'||leaving)&&<Modal title="保留当前修改？" onClose={()=>{blocker.reset?.();setLeaving(null);}}><div className="modal-body">当前页面有未保存的修改。离开前可以继续编辑并保存。</div><footer className="modal-footer"><button className="button" onClick={()=>{blocker.reset?.();setLeaving(null);}}>继续编辑</button><button className="button primary" onClick={()=>{setDirty(false);if(blocker.state==='blocked')blocker.proceed();if(leaving){leaving();setLeaving(null);}}}>放弃修改并离开</button></footer></Modal>}
+ {rollback&&<Modal title={`切换 ${rollback.agent.name} 的发布版本？`} onClose={()=>setRollback(null)}><div className="modal-body">新会话将使用 v{rollback.release.version}，已有会话继续使用创建时的版本。</div><footer className="modal-footer"><button className="button" onClick={()=>setRollback(null)}>取消</button><button className="button primary" disabled={busy} onClick={()=>void action(()=>api.post(`${management(workspace)}/agents/${rollback.agent.id}/rollback`,{release_id:rollback.release.release_id||rollback.release.id}),'已切换新会话使用的发布版本').then(()=>setRollback(null))}>确认切换</button></footer></Modal>}
+ {preview&&<LivePreview api={api} agent={preview} onClose={()=>setPreview(null)}/>}
+ {releases&&<Modal title={`${releases.agent.name} · 发布版本`} onClose={()=>setReleases(null)}><div className="modal-body">{releases.items.map(r=><div className="release-row" key={r.release_id||r.id}><div><strong>v{r.version}</strong><small>{r.capabilities.length} 项功能</small></div><button className="button" disabled={!publishable||busy} onClick={()=>setRollback({agent:releases.agent,release:r})}>用于新会话</button></div>)}</div></Modal>}
+ </div>;
 }

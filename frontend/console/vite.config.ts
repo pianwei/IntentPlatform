@@ -19,13 +19,7 @@ export default defineConfig(({ mode }) => ({
     outDir: "../dist/console",
     emptyOutDir: true,
     rollupOptions: {
-      input:
-        mode === "development"
-          ? {
-              main: fileURLToPath(new URL("index.html", import.meta.url)),
-              host: fileURLToPath(new URL("dev-host.html", import.meta.url)),
-            }
-          : fileURLToPath(new URL("index.html", import.meta.url)),
+      input: fileURLToPath(new URL("index.html", import.meta.url)),
     },
   },
 }));

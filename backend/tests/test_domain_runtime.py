@@ -99,7 +99,8 @@ def semantic_app(client, admin, resolver_service):
                     "presentation": {"field_map": {"Items": "items"}},
                     "result_bindings": [{"name": "items", "entity_type": "test:Item", "collection_path": "items", "id_field": "id", "label_field": "label", "resolver_ref": "local-items@1"}]})
     listing_id = publish_function(client, admin, listing, {})
-    response = client.post(WS + "/agents", headers=admin, json={"name": "Domain test app", "capability_ids": [fid, listing_id]})
+    response = client.post(WS + "/agents", headers=admin, json={"name": "Domain test app " + uuid.uuid4().hex[:12], "capability_ids": [fid, listing_id]})
+    assert response.status_code == 201, response.text
     agent = response.json()
     response = client.post(WS + f"/agents/{agent['id']}/publish", headers=admin)
     assert response.status_code == 200, response.text
@@ -222,10 +223,13 @@ def test_entity_revocation_at_dispatch_and_reconciliation(client, admin, semanti
     assert work["run_id"] == rid
     app["state"]["denied"].add("synthetic-1")
     process_call(work)
-    assert read(client, app, rid)["calls"][0]["status"] == "FAILED"
+    # Revocation also closes restored reads, including pinned legacy v2 calls.
+    assert client.get(f"/api/v2/runtime/runs/{rid}", headers=app["headers"]).status_code == 403
+    assert client.get(f"/api/v2/runtime/conversations/{app['cid']}/events", headers=app["headers"]).status_code == 403
+    assert client.get(f"/api/v2/runtime/conversations/{app['cid']}/history", headers=app["headers"]).status_code == 403
     with Session(engine) as db, db.begin():
         set_identity(db, "dev-admin"); call = db.get(Call, work["id"])
-        assert call.dispatched_at is None
+        assert call.status == "FAILED" and call.dispatched_at is None
         call.status = "RECONCILING"
     with pytest.raises(ValueError): authorize_reconciliation(work)
 

@@ -28,8 +28,9 @@ describe("application publication boundary", () => {
     const fetch = vi.fn((path: string, options: RequestInit) => Promise.resolve(respond(options.method === "PATCH" ? { ...agent, revision: 9 } : [])));
     vi.stubGlobal("fetch", fetch);
     render(<AgentEditor api={new ApiClient("management")} workspace="ws-a" item={agent} functions={[]} onClose={vi.fn()} onSaved={vi.fn().mockResolvedValue(undefined)} />);
+    fireEvent.click(screen.getByRole("button",{name:"对话界面"}));
     fireEvent.change(screen.getByLabelText("欢迎语"), { target: { value: "欢迎咨询业务" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存智能体草稿" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
     await waitFor(() => expect(fetch.mock.calls.some(([, o]) => o.method === "PATCH")).toBe(true));
     const patch = fetch.mock.calls.find(([, o]) => o.method === "PATCH")!;
     const body = JSON.parse(patch[1].body as string);
@@ -41,10 +42,11 @@ describe("application publication boundary", () => {
   it("submits an empty allowlist as an explicit live denial, independently of draft saves", async () => {
     const fetch = vi.fn((path: string, options: RequestInit) => Promise.resolve(respond(options.method === "PUT" ? { ...agent, access: { access_mode: "allowlist", allowed_users: [] } } : [])));
     vi.stubGlobal("fetch", fetch);
-    render(<AgentEditor api={new ApiClient("management")} workspace="ws-a" item={agent} functions={[]} onClose={vi.fn()} onSaved={vi.fn().mockResolvedValue(undefined)} />);
+    render(<AgentEditor api={new ApiClient("management")} workspace="ws-a" item={agent} admin functions={[]} onClose={vi.fn()} onSaved={vi.fn().mockResolvedValue(undefined)} />);
     fireEvent.click(screen.getByRole("button", { name: "访问控制" }));
-    fireEvent.change(screen.getByLabelText("允许的用户标识（一行一个）"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", {name:"清空名单"}));
     fireEvent.click(screen.getByRole("button", { name: "保存访问权限" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认" }));
     await waitFor(() => expect(fetch.mock.calls.some(([, o]) => o.method === "PUT")).toBe(true));
     const update = fetch.mock.calls.find(([, o]) => o.method === "PUT")!;
     expect(update[0]).toMatch(/\/access$/); expect(JSON.parse(update[1].body as string)).toEqual({ access_mode: "allowlist", allowed_users: [] });
@@ -60,11 +62,14 @@ describe("application publication boundary", () => {
     const fetch = vi.fn((_path: string, _options: RequestInit) => Promise.resolve(respond([]))); vi.stubGlobal("fetch", fetch);
     render(<AgentEditor api={new ApiClient("management")} workspace="ws-a" item={{ ...agent, allowed_origins: [], published_origins: ["https://old-host.internal"], revoked_origins: [] }} functions={[]} onClose={vi.fn()} onSaved={vi.fn().mockResolvedValue(undefined)} />);
     fireEvent.click(screen.getByRole("button", { name: "访问控制" }));
-    const draft = screen.getByLabelText("允许的 iframe 宿主 Origin（一行一个）");
+    fireEvent.click(screen.getByText("已发布网站与即时撤销"));
+    const draft = screen.getByLabelText("新增嵌入网站");
     fireEvent.change(draft, { target: { value: "https://next-host.internal" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加网站" }));
     fireEvent.click(screen.getByRole("button", { name: "立即撤销" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认" }));
     await screen.findByText("已撤销");
-    expect(draft).toHaveValue("https://next-host.internal");
+    expect(screen.getByText("https://next-host.internal")).toBeVisible();
     const revoke = fetch.mock.calls.find(([path]) => path.endsWith("/revoke-origin"))!;
     expect(JSON.parse(revoke[1].body as string)).toEqual({ origin: "https://old-host.internal" });
     expect(fetch.mock.calls.some(([, options]) => options.method === "PATCH")).toBe(false);
@@ -107,14 +112,16 @@ describe("runtime identity and recovery", () => {
     const conversation: Conversation = { id: "conversation-a", conversation_id: "conversation-a", agent_id: "agent-a", release_id: "release-old", status: "active", fixture_mode: true, title: "昨日查询", runtime_ui: { ...ui, title: "旧版本界面" } };
     const fetch = vi.fn((path: string) => {
       if (path.endsWith("/agents/agent-a")) return Promise.resolve(respond(agent));
-      if (path.endsWith("/conversations")) return Promise.resolve(respond([conversation]));
-      if (path.endsWith("/history")) return Promise.resolve(respond({ conversation, messages: [{ run_id: "run-old", text: "曾经提交的查询", revision: 1, status: "SUCCEEDED" }], runs: [{ run_id: "run-old", conversation_id: "conversation-a", revision: 1, status: "SUCCEEDED" }], events: [], cursor: 17 }));
+      if (path.split("?")[0].endsWith("/conversations")) return Promise.resolve(respond([conversation]));
+      if (path.endsWith("/history")) return Promise.resolve(respond({ conversation, messages: [{ run_id: "run-old", text: "曾经提交的查询", revision: 1, status: "SUCCEEDED" }], runs: [{ run_id: "run-old", conversation_id: "conversation-a", revision: 1, status: "SUCCEEDED", steps: [{ name: "internal-step-name", status: "SUCCEEDED", input: { secret: "internal-input" }, output: "internal-output", elapsed_ms: 8 }] }], events: [{ schema_version: "1", conversation_id: "conversation-a", run_id: "run-old", revision: 1, sequence: 17, event_type: "RESULT", payload: { title: "最终回答", component: "text", data: "余额为100元" } }], cursor: 17 }));
       if (path.includes("/events?")) return Promise.resolve(respond([]));
       return Promise.resolve(respond({ run_id: "run-old", conversation_id: "conversation-a", revision: 1, status: "SUCCEEDED" }));
     }); vi.stubGlobal("fetch", fetch);
     render(<AgentWorkspace api={new ApiClient("runtime")} app={app} storageKey={key} identity={identity} embedded={false} onLogout={vi.fn()} />);
     await screen.findByText("曾经提交的查询");
     expect(screen.getByRole("heading", { name: "旧版本界面" })).toBeVisible();
+    expect(await screen.findByText("余额为100元")).toBeVisible();
+    expect(screen.queryByText(/internal-step-name|internal-input|internal-output|处理记录/)).toBeNull();
     await waitFor(() => expect(fetch.mock.calls.some(([path]) => path.endsWith("/events?after=17"))).toBe(true));
     expect(fetch.mock.calls.some(([path]) => path.endsWith("/messages"))).toBe(false);
     expect(readLocator(key)).toEqual({ runtime_session_id: "session-a", conversation_id: "conversation-a" });

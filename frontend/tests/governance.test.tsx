@@ -66,23 +66,26 @@ it("offers only matching approved credential references while retaining unavaila
   await screen.findByRole("option", { name: "http-reader" }); expect(screen.queryByRole("option", { name: "dify-only" })).not.toBeInTheDocument(); expect(screen.getByLabelText("凭据引用")).toHaveValue("old-ref");
   fireEvent.change(screen.getByLabelText("凭据引用"), { target: { value: "http-reader" } }); expect(change).toHaveBeenLastCalledWith("http-reader");
 });
-it("separates selected draft integrations from live revocation and preserves an unsaved draft", async () => {
-  const api = agentApi(); const post = vi.spyOn(api, "post").mockResolvedValue({ ...agent, revision: 99, revoked_integration_refs: ["trusted-a"] }); const patch = vi.spyOn(api, "patch").mockRejectedValue(new ApiError(409, "Agent draft revision changed"));
-  render(<AgentEditor api={api} workspace="ws" item={agent} functions={[]} onClose={vi.fn()} onSaved={async () => {}} />);
-  fireEvent.click(screen.getByRole("button", { name: "访问控制" })); const a = await screen.findByLabelText("身份集成 trusted-a"); fireEvent.click(a); fireEvent.click(screen.getByLabelText("身份集成 trusted-b"));
-  fireEvent.change(screen.getByLabelText("允许的 iframe 宿主 Origin（一行一个）"), { target: { value: "https://draft.example" } });
-  fireEvent.click(screen.getByRole("button", { name: "立即撤销集成 trusted-a" })); await screen.findByText("已即时撤销");
-  expect(screen.getByLabelText("身份集成 trusted-b")).toBeChecked(); expect(a).not.toBeChecked(); expect(a).toBeDisabled(); expect(screen.getByLabelText("允许的 iframe 宿主 Origin（一行一个）")).toHaveValue("https://draft.example"); expect(post).toHaveBeenLastCalledWith("/api/v2/management/workspaces/ws/agents/a/revoke-integration", { integration_ref: "trusted-a" });
-  fireEvent.click(screen.getByRole("button", { name: "保存智能体草稿" })); await screen.findByText(/Agent draft revision changed/);
-  expect(patch).toHaveBeenLastCalledWith("/api/v2/management/workspaces/ws/agents/a/draft", expect.objectContaining({ revision: 2, integration_refs: ["trusted-b"] })); expect(screen.getByLabelText("身份集成 trusted-b")).toBeChecked();
+it("uses local access policy without changing historical integration fields or losing unsaved origins",async()=>{
+ const api=agentApi(); const patch=vi.spyOn(api,"patch").mockRejectedValue(new ApiError(409,"Agent draft revision changed"));
+ render(<AgentEditor api={api} workspace="ws" item={agent} functions={[]} onClose={vi.fn()} onSaved={async()=>{}}/>);
+ fireEvent.click(screen.getByRole("button",{name:"访问控制"}));
+ expect(screen.getByText("公开 Chat")).toBeVisible();expect(screen.queryByLabelText("身份集成 trusted-a")).toBeNull();
+ fireEvent.click(screen.getByRole("checkbox",{name:"iframe 嵌入"}));
+ fireEvent.change(screen.getByLabelText("新增嵌入网站"),{target:{value:"https://draft.example"}});
+ fireEvent.click(screen.getByRole("button",{name:"添加网站"}));
+ fireEvent.click(screen.getByRole("button",{name:"保存草稿"}));await screen.findByText(/Agent draft revision changed/);
+ expect(patch.mock.calls[0][1]).not.toHaveProperty("integration_refs");
+ expect(screen.getByText("https://draft.example")).toBeVisible();
 });
+
 it("preserves legacy undefined integration selection and lets users remove disabled or missing selected functions", async () => {
   const api = agentApi(); const patch = vi.spyOn(api, "patch").mockResolvedValue(agent);
   const legacy = { ...agent, integration_refs: undefined, published_integration_refs: null, capability_ids: ["f", "missing"] };
   const disabled: Capability = { id: "f", workspace_id: "ws", name: "停用合成功能", description: "合成", revision: 2, status: "disabled", latest_version: 1, is_fixture: false, definition: { ...blankDefinition, name: "停用合成功能" } };
   render(<AgentEditor api={api} workspace="ws" item={legacy} functions={[disabled]} onClose={vi.fn()} onSaved={async () => {}} />);
-  fireEvent.click(screen.getByRole("button", { name: "访问控制" })); await screen.findByText(/当前发布为旧版身份规则/); expect(screen.getByText(/当前响应未提供集成草稿选择/)).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "发布与嵌入" })); expect(screen.getByLabelText("选择功能 停用合成功能")).toBeChecked(); fireEvent.click(screen.getByLabelText("选择功能 停用合成功能")); expect(screen.queryByLabelText("选择功能 停用合成功能")).not.toBeInTheDocument();
-  expect(screen.getByLabelText("移除不可用功能 missing")).toBeChecked(); fireEvent.click(screen.getByRole("button", { name: "保存智能体草稿" }));
+  fireEvent.click(screen.getByRole("button", { name: "访问控制" })); expect(screen.getByText("公开 Chat")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "业务能力" })); expect(screen.getByRole("button",{name:"移除 停用合成功能"})).toBeEnabled(); fireEvent.click(screen.getByRole("button",{name:"移除 停用合成功能"})); expect(screen.queryByRole("button",{name:"移除 停用合成功能"})).not.toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"移除 不可用功能"})).toBeEnabled(); fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
   await waitFor(() => expect(patch).toHaveBeenCalled()); expect(patch.mock.calls[0][1]).not.toHaveProperty("integration_refs"); expect(patch.mock.calls[0][1]).toMatchObject({ capability_ids: ["missing"] });
 });

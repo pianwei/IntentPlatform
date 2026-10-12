@@ -110,7 +110,10 @@ def execute_http_v2(definition, arguments, call_id, user_id, workspace_id, recon
     elif cfg.env == "production": raise PermissionError("Production object authorization is unavailable")
     if before_send: before_send()
     try:
-        raw = request_json_parts("GET" if reconcile_operation else c["method"], url, params=query, json_body=body, headers=headers, timeout=c["timeout_seconds"])
+        empty_allowed = (definition.get("output_mode") == "none" and not definition.get("success_condition")
+                         and not any(c.get(k) for k in ("status_path", "result_path", "operation_id_path")))
+        kwargs = {"allow_empty": True} if empty_allowed else {}
+        raw = request_json_parts("GET" if reconcile_operation else c["method"], url, params=query, json_body=body, headers=headers, timeout=c["timeout_seconds"], **kwargs)
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         if reconcile_operation or code not in c.get("http_failure_statuses", []):

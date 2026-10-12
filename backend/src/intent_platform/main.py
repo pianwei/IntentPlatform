@@ -4,14 +4,17 @@ import json
 import secrets
 from datetime import timedelta
 from pathlib import Path
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Body, Request
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Body, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, HTMLResponse, Response
+from fastapi.responses import StreamingResponse, HTMLResponse, Response, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from .config import settings
 from .db import engine, session, set_identity, now, uid
-from .models import (AuthToken, Workspace, Membership, Function, Agent, Release, Conversation, Run, Call, Event,
+from .models import (AuthToken, Workspace, Membership, Function, FunctionVersion, Agent, Release, Conversation, Run, Call, Event,
                      Handshake, Ticket, Audit, Document, Evaluation, RuntimeSession)
 from .schemas import ImportBody, DraftBody, ValidateBody, AgentBody, MessageBody, AnswerBody, ConfirmationBody, EmbedBody
 from .auth import authenticate, manager, authorize, bootstrap_identity, issue_token, workspaces, token_valid, audit
@@ -30,7 +33,40 @@ from .api_models import (LoginBody, IdentityBody, PublishBody, RollbackBody, Rev
 
 app = FastAPI(title="意图中台本地工程", version="0.1.0", description="Development fixtures are not bank acceptance evidence", docs_url=None, redoc_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings().cors_origins.split(",")],
-                   allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "PUT"], allow_headers=["Authorization", "Content-Type"])
+                   allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "PUT"], allow_headers=["Authorization", "Content-Type"])
+
+
+@app.middleware("http")
+async def local_request_policy(request: Request, call_next):
+    path = request.url.path
+    protected = path.startswith(("/api/v2/auth/", "/api/v2/me", "/api/v2/management/"))
+    if settings().identity_mode == "local" and protected and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin")
+        if origin and origin not in {item.strip() for item in settings().cors_origins.split(",")}:
+            return JSONResponse({"detail": "Untrusted request origin"}, status_code=403)
+    response = await call_next(request)
+    if path.startswith("/api/v2/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def safe_validation_error(request: Request, exc: RequestValidationError):
+    # Never echo a submitted password, recovery secret or ticket in error bodies.
+    sensitive = {"password", "current_password", "new_password", "setup_token", "recovery_secret", "ticket", "identity_token"}
+    errors = exc.errors()
+    if any(any(part in sensitive for part in error.get("loc", ())) for error in errors):
+        safe = [{key: error[key] for key in ("type", "loc", "msg") if key in error} for error in errors]
+        return JSONResponse({"detail": safe}, status_code=422)
+    return await request_validation_exception_handler(request, exc)
+
+
+@app.exception_handler(IntegrityError)
+async def unique_agent_name(request: Request, exc: IntegrityError):
+    constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+    if constraint in {"uq_agent_workspace_name", "uq_agent_workspace_normalized_name"}:
+        return JSONResponse({"detail": "Agent name is already used in this workspace"}, status_code=409)
+    raise exc
 
 
 @app.get("/docs", response_class=HTMLResponse, include_in_schema=False)
@@ -61,6 +97,7 @@ def dev_login(body: LoginBody = Body(default=LoginBody()), db: Session = Depends
 @app.post("/api/v2/auth/exchange", response_model=TokenOut)
 def auth_exchange(body: IdentityBody, db: Session = Depends(session)):
     cfg = settings()
+    if cfg.identity_mode != "legacy-test": raise HTTPException(404, "Historical identity exchange is disabled")
     if not cfg.identity_introspection_url:
         raise HTTPException(503, "Trusted identity introspection is not configured")
     try:
@@ -93,6 +130,9 @@ def auth_exchange(body: IdentityBody, db: Session = Depends(session)):
 
 @app.get("/api/v2/me", response_model=MeOut)
 def me(token=Depends(authenticate), db: Session = Depends(session)):
+    if settings().identity_mode == "local":
+        from .local_identity import local_profile
+        return local_profile(db, token)
     return {"user_id": token.user_id, "scope": token.scope, "workspaces": workspaces(db, token), "fixture_mode": settings().fixture_mode}
 
 
@@ -114,7 +154,10 @@ def import_function(ws: str, body: ImportBody, token=Depends(authenticate), db: 
     manager(db, token, ws)
     if settings().env == "production" and body.definition.connector.kind == "fixture":
         raise HTTPException(422, "Fixture connector forbidden in production")
-    f = Function(workspace_id=ws, definition=body.definition.model_dump(), document_text=body.document_text,
+    from .function_authoring import normalize_draft
+    definition = normalize_draft(db, ws, body.definition.model_dump())
+    definition["output_examples"] = []
+    f = Function(workspace_id=ws, definition=definition, document_text=body.document_text,
                  allowed_users=body.definition.allowed_users, access_mode="allowlist" if body.definition.allowed_users else "workspace")
     db.add(f); db.flush(); audit(db, token.user_id, ws, "function.import", f.id)
     response = function_view(f); db.commit(); return response
@@ -128,7 +171,11 @@ def edit_function(ws: str, fid: str, body: DraftBody, token=Depends(authenticate
         raise HTTPException(409, "Draft revision changed")
     if settings().env == "production" and body.definition.connector.kind == "fixture":
         raise HTTPException(422, "Fixture connector forbidden in production")
-    f.definition = body.definition.model_dump(); f.revision += 1; f.validated_revision = None; f.validation = None; f.status = "draft"
+    from .function_authoring import normalize_draft
+    definition = normalize_draft(db, ws, body.definition.model_dump())
+    # Approved cases are populated exclusively from server-side current tests.
+    definition["output_examples"] = f.definition.get("output_examples", [])
+    f.definition = definition; f.revision += 1; f.validated_revision = None; f.validation = None; f.status = "draft"
     from .source_review import invalidate
     invalidate(f)
     audit(db, token.user_id, ws, "function.edit", fid, {"revision": f.revision})
@@ -151,6 +198,19 @@ def function_publish(ws: str, fid: str, body: PublishBody = Body(default=Publish
     if body.revision is not None and body.revision != f.revision:
         raise HTTPException(409, "Function revision changed")
     result = publish_function(db, f, token); db.commit(); return result
+
+
+@app.get("/api/v2/management/workspaces/{ws}/functions/{fid}/versions")
+def function_versions(ws: str, fid: str, token=Depends(authenticate), db: Session = Depends(session)):
+    manager(db, token, ws)
+    function = get_resource(db, Function, fid, ws)
+    return [{"id": version.id, "function_id": version.function_id, "version": version.version,
+             "definition": version.definition, "created_at": version.created_at,
+             "current": version.version == function.latest_version}
+            for version in db.scalars(select(FunctionVersion).where(
+                FunctionVersion.workspace_id == ws, FunctionVersion.function_id == fid,
+                FunctionVersion.version > 0
+            ).order_by(FunctionVersion.version.desc()))]
 
 
 @app.post("/api/v2/management/workspaces/{ws}/functions/{fid}/disable", response_model=FunctionOut)
@@ -185,12 +245,14 @@ async def upload_document(ws: str, file: UploadFile = File(...), token=Depends(a
 @app.get("/api/v2/management/workspaces/{ws}/agents", response_model=list[AgentOut])
 def list_agents(ws: str, token=Depends(authenticate), db: Session = Depends(session)):
     manager(db, token, ws, "publisher")
-    return [agent_view(a, db) for a in db.scalars(select(Agent).where(Agent.workspace_id == ws))]
+    return [agent_view(a, db) for a in db.scalars(select(Agent).where(Agent.workspace_id == ws)) if not (a.runtime_ui or {}).get("authoring_test")]
 
 
 @app.post("/api/v2/management/workspaces/{ws}/agents", status_code=201, response_model=AgentOut)
 def create_agent(ws: str, body: AgentBody, token=Depends(authenticate), db: Session = Depends(session)):
     manager(db, token, ws, "publisher")
+    if db.execute(text("SELECT id FROM agents WHERE workspace_id=:ws AND lower(btrim(name))=lower(:name)"), {"ws": ws, "name": body.name}).first():
+        raise HTTPException(409, "Agent name already exists in this workspace")
     for fid in body.capability_ids:
         get_resource(db, Function, fid, ws)
     values = body.model_dump(exclude={"revision"}, exclude_none=True)
@@ -207,6 +269,8 @@ def create_agent(ws: str, body: AgentBody, token=Depends(authenticate), db: Sess
 def edit_agent(ws: str, aid: str, body: AgentBody, token=Depends(authenticate), db: Session = Depends(session)):
     manager(db, token, ws, "publisher")
     a = get_resource(db, Agent, aid, ws, lock=True)
+    if db.execute(text("SELECT id FROM agents WHERE workspace_id=:ws AND id<>:id AND lower(btrim(name))=lower(:name)"), {"ws": ws, "id": aid, "name": body.name}).first():
+        raise HTTPException(409, "Agent name already exists in this workspace")
     if body.revision != a.revision:
         raise HTTPException(409, "Current agent draft revision required")
     for fid in body.capability_ids:
@@ -251,10 +315,13 @@ def rollback(ws: str, aid: str, body: RollbackBody, token=Depends(authenticate),
 
 
 @app.get("/api/v2/management/workspaces/{ws}/audit")
-def audits(ws: str, token=Depends(authenticate), db: Session = Depends(session)):
-    manager(db, token, ws, "admin")
-    return [{"id": a.id, "user_id": a.user_id, "action": a.action, "resource_id": a.resource_id, "detail": a.detail, "created_at": a.created_at}
-            for a in db.scalars(select(Audit).where(Audit.workspace_id == ws).order_by(Audit.created_at.desc()).limit(200))]
+def audits(ws: str, resource_id: str | None = None, token=Depends(authenticate), db: Session = Depends(session)):
+    manager(db, token, ws, "admin", archived_history=True)
+    from .workspace_admin import identity_directory
+    names = identity_directory()
+    return [{"id": a.id, "user_id": a.user_id, "actor_name": names.get(a.user_id), "action": a.action, "resource_id": a.resource_id, "detail": a.detail, "created_at": a.created_at}
+            for a in db.scalars(select(Audit).where(Audit.workspace_id == ws,
+                *([Audit.resource_id == resource_id] if resource_id else [])).order_by(Audit.created_at.desc()).limit(200))]
 
 
 @app.post("/api/v2/management/workspaces/{ws}/evaluations")
@@ -267,6 +334,8 @@ def evaluate(ws: str, body: EvaluationBody, token=Depends(authenticate), db: Ses
     if not cases or len(cases) > 1000:
         raise HTTPException(422, "Provide 1 to 1000 diagnostic cases")
     release = db.get(Release, a.current_release_id)
+    if release.snapshot.get("prompt_policy_version") == "three-layer-v1":
+        raise HTTPException(409, "Three-layer agents require actual runtime evaluation with management traces")
     if error := dependency_error(release.snapshot, db):
         raise HTTPException(409, error)
     candidates = visible_candidates(db, release, token)
@@ -291,6 +360,8 @@ def runtime_agents(token=Depends(authenticate), db: Session = Depends(session)):
         q = q.where(Agent.id == token.agent_id)
     result = []
     for a in db.scalars(q):
+        if (a.runtime_ui or {}).get("authoring_test"):
+            continue
         if not permitted(a, token.user_id):
             continue
         release = db.get(Release, a.current_release_id)
@@ -324,7 +395,11 @@ def runtime_agent_info(aid: str, token=Depends(authenticate), db: Session = Depe
 
 @app.post("/api/v2/runtime/agents/{aid}/conversations", status_code=201, response_model=ConversationOut)
 def new_conversation(aid: str, token=Depends(authenticate), db: Session = Depends(session)):
+    if settings().identity_mode == "local" and token.scope != "runtime": raise HTTPException(403, "Use the application runtime session")
     a = runtime_agent(db, aid, token)
+    from .workspace_lifecycle import require_workspace
+    require_workspace(db, a.workspace_id, lock=True)
+    if not token_valid(db, token): raise HTTPException(401, "Runtime identity changed")
     r = db.get(Release, a.current_release_id)
     if token.scope == "management" and not effective_channels(a, r)["chat"]:
         raise HTTPException(403, "Chat channel disabled")
@@ -390,7 +465,7 @@ def answer(rid: str, body: AnswerBody, token=Depends(authenticate), db: Session 
         if set(body.values) != {"detail"} or not isinstance(detail, str) or not detail.strip() or len(detail) > 2000:
             raise HTTPException(422, "Provide a short clarification")
         run.text += "\n补充说明：" + detail.strip()
-        run.proposal = {"planner_clarification_count": 1}
+        run.proposal = {**(run.proposal or {}), "planner_clarification_count": 1}
     elif run.question.get("kind") in {"planner_arguments", "planner_choice"}:
         from .models import ExecutionPlan, PlanStep
         from .planning import trace
@@ -399,8 +474,18 @@ def answer(rid: str, body: AnswerBody, token=Depends(authenticate), db: Session 
             raise HTTPException(409, "Planning state is unavailable")
         if run.question["kind"] == "planner_arguments":
             allowed = {field["name"] for field in run.question["fields"]}
-            if set(body.values) != allowed or any(not isinstance(value, str) or not value.strip() or len(value) > 500 for value in body.values.values()):
+            if set(body.values) != allowed:
                 raise HTTPException(422, "Provide all requested planning inputs")
+            from .ontology import input_errors
+            schema = {"type": "object", "properties": {field["name"]: field.get("schema") or {"type": "string", "minLength": 1, "maxLength": 500} for field in run.question["fields"]},
+                      "required": list(allowed), "additionalProperties": False}
+            if input_errors(schema, body.values):
+                raise HTTPException(422, "Planning inputs do not match the declared field types")
+            from .planning_schemas import ExecutionPlanSpec
+            try:
+                ExecutionPlanSpec.model_validate({**{k: plan.snapshot[k] for k in ("steps", "result_steps", "final_output_mapping") if k in plan.snapshot}, "inputs": {**plan.inputs, **body.values}})
+            except ValueError:
+                raise HTTPException(422, "Planning inputs exceed the finite input budget")
             plan.inputs = {**plan.inputs, **body.values}
             trace(db, run, "entity", "input_supplied", {"fields": sorted(body.values)})
         else:
@@ -408,14 +493,16 @@ def answer(rid: str, body: AnswerBody, token=Depends(authenticate), db: Session 
             if body.option_id not in allowed:
                 raise HTTPException(422, "Select a current candidate")
             step = db.scalar(select(PlanStep).where(PlanStep.plan_id == plan.id, PlanStep.step_key == run.question["step_key"]).with_for_update())
-            rows = (step.result or {}).get("data", {}).get("customers", []) if step else []
-            selected = [row for row in rows if row.get("customer_id") == body.option_id]
+            collection_field = run.question.get("collection_field", "customers")
+            id_field = run.question.get("id_field", "customer_id")
+            rows = (step.result or {}).get("data", {}).get(collection_field, []) if step else []
+            selected = [row for row in rows if row.get(id_field) == body.option_id]
             if len(selected) != 1:
                 raise HTTPException(409, "Candidate is unavailable")
-            step.result = {"data": {**step.result["data"], "customers": selected}}
+            step.result = {"data": {**step.result["data"], collection_field: selected}}
             plan.inputs = {**plan.inputs, "__chosen:" + step.step_key: body.option_id}
             trace(db, run, "entity", "candidate_selected", {"step": step.step_key,
-                                                               "bound_object_type": "customer", "binding_source": "user_choice"})
+                                                               "bound_object_type": next((b["entity_type"] for b in step.definition.get("result_bindings", []) if b["collection_path"] == collection_field), "entity") if plan.snapshot.get("three_layer") else "customer", "binding_source": "user_choice"})
     elif run.question.get("kind") in {"entity_mention", "entity_choice", "history_choice"}:
         from .context_binding import apply_binding_answer
         try:
@@ -446,6 +533,8 @@ def answer(rid: str, body: AnswerBody, token=Depends(authenticate), db: Session 
         if units:
             proposal["requests"][run.question["request_index"]].setdefault("parameter_units", {}).update(units)
         run.proposal = proposal
+    from .conversation_logs import record_interaction
+    record_interaction(db, run, "answer", body.model_dump())
     run.revision += 1; run.status = "RECEIVED"; run.queued_at = now(); run.confirmed = False; run.question = None; run.validation_evidence = None
     status_event(db, run); result = run_view(db, run); db.commit(); return result
 
@@ -458,6 +547,8 @@ def confirm(rid: str, body: ConfirmationBody, token=Depends(authenticate), db: S
     run = owned_run(db, rid, token, lock=True)
     if run.status != "WAITING_CONFIRMATION" or run.revision != body.revision or not run.confirmation_expires_at or run.confirmation_expires_at <= now():
         raise HTTPException(409, "Confirmation is stale or expired")
+    from .conversation_logs import record_interaction
+    record_interaction(db, run, "confirmation", body.model_dump())
     run.confirmed = body.confirmed; run.status = "RECEIVED" if body.confirmed else "CANCELLED"
     if body.confirmed: run.queued_at = now()
     audit(db, token.user_id, run.workspace_id, "run.confirm" if body.confirmed else "run.reject", rid, {"revision": run.revision})
@@ -488,11 +579,16 @@ def read_events(db, cid, token, after):
     from .models import ExecutionPlan, PlanStep
     run_ids = {event.run_id for event in batch}
     if run_ids:
+        from .services import authorize_run_capabilities
+        for run_id in run_ids:
+            authorize_run_capabilities(db, db.get(Run, run_id))
         # Every event of a plan, including its final text answer, inherits the
         # current permission of every capability whose result contributed to it.
         used = set(db.scalars(select(Call.capability_id).where(Call.run_id.in_(run_ids))))
         used.update(db.scalars(select(PlanStep.capability_id).join(ExecutionPlan, ExecutionPlan.id == PlanStep.plan_id)
                                .where(ExecutionPlan.run_id.in_(run_ids))))
+        used.update(p.snapshot["composite_function_id"] for p in db.scalars(select(ExecutionPlan).where(ExecutionPlan.run_id.in_(run_ids)))
+                    if p.snapshot.get("composite_function_id"))
         for capability_id in used:
             function = db.get(Function, capability_id)
             if not function or function.disabled or not permitted(function, token.user_id):
@@ -588,14 +684,22 @@ def handshake(body: EmbedBody, db: Session = Depends(session)):
     row = db.execute(text("SELECT * FROM intent_embed_agent(:id)"), {"id": body.agent_id}).mappings().first()
     if not row or body.host_origin not in row["allowed_origins"]:
         raise HTTPException(403, "Host origin is not allowed")
+    from .workspace_lifecycle import require_workspace
+    epoch = require_workspace(db, row["workspace_id"], lock=True)
     h = Handshake(id=secrets.token_urlsafe(24), agent_id=body.agent_id, workspace_id=row["workspace_id"], host_origin=body.host_origin,
-                  expires_at=now() + timedelta(seconds=settings().ticket_seconds))
+                  workspace_epoch=epoch, expires_at=now() + timedelta(seconds=settings().ticket_seconds))
     db.add(h); db.commit(); return {"instance_nonce": h.id, "expires_at": h.expires_at, "protocol_version": "1"}
 
 
 @app.post("/api/v2/integrations/embed-tickets", response_model=TicketOut)
-def ticket(body: EmbedBody, token=Depends(authenticate), db: Session = Depends(session)):
+def ticket(body: EmbedBody, authorization: str | None = Header(default=None), db: Session = Depends(session)):
+    if settings().identity_mode == "local":
+        from .identity_api import key_ticket
+        return key_ticket(db, body, authorization)
+    token = authenticate(authorization, db)
     a = runtime_agent(db, body.agent_id, token)
+    from .workspace_lifecycle import require_workspace
+    epoch = require_workspace(db, a.workspace_id, lock=True)
     if token.scope != "management":
         raise HTTPException(403, "Runtime sessions cannot mint embed tickets")
     from .trust import integration_allowed, token_integration
@@ -609,20 +713,27 @@ def ticket(body: EmbedBody, token=Depends(authenticate), db: Session = Depends(s
             raise HTTPException(403, "Trusted integration delegation does not permit this binding")
     h = db.get(Handshake, body.instance_nonce or "")
     active_origins = db.get(Release, a.current_release_id).snapshot["allowed_origins"]
-    if not h or h.expires_at <= now() or h.agent_id != a.id or h.host_origin != body.host_origin or body.host_origin not in active_origins or body.host_origin in a.revoked_origins:
+    if not h or h.workspace_epoch != epoch or h.expires_at <= now() or h.agent_id != a.id or h.host_origin != body.host_origin or body.host_origin not in active_origins or body.host_origin in a.revoked_origins:
         raise HTTPException(403, "Invalid or expired handshake")
     if not effective_channels(a, db.get(Release, a.current_release_id))["embed"]:
         raise HTTPException(403, "Embed channel disabled")
     if body.runtime_session_id:
         check_session_binding(db, body.runtime_session_id, token, a, "embed", body.host_origin)
     t = Ticket(id=secrets.token_urlsafe(36), user_id=token.user_id, workspace_id=a.workspace_id, agent_id=a.id,
+               workspace_epoch=epoch,
                host_origin=body.host_origin, instance_nonce=h.id, expires_at=now() + timedelta(seconds=settings().ticket_seconds), source_token_id=token.id, runtime_session_id=body.runtime_session_id, integration_id=token_integration(token))
     db.add(t); db.commit(); return {"ticket": t.id, "expires_at": t.expires_at}
 
 
 @app.post("/api/v2/runtime/embed/exchange", response_model=TokenOut)
 def exchange(body: EmbedBody, db: Session = Depends(session)):
-    t = db.scalar(select(Ticket).where(Ticket.id == (body.ticket or "")).with_for_update())
+    if settings().identity_mode == "local":
+        from .identity_api import key_exchange
+        return key_exchange(db, body)
+    initial = db.get(Ticket, body.ticket or "")
+    from .workspace_lifecycle import require_workspace
+    if initial: require_workspace(db, initial.workspace_id, epoch=initial.workspace_epoch, lock=True)
+    t = db.scalar(select(Ticket).where(Ticket.id == (body.ticket or "")).with_for_update().execution_options(populate_existing=True))
     if not t or t.consumed or t.expires_at <= now() or (t.agent_id, t.host_origin, t.instance_nonce, t.runtime_session_id) != (body.agent_id, body.host_origin, body.instance_nonce, body.runtime_session_id):
         raise HTTPException(403, "Invalid, expired or consumed ticket")
     parent = db.get(AuthToken, t.source_token_id)
@@ -645,12 +756,14 @@ def exchange(body: EmbedBody, db: Session = Depends(session)):
 
 @app.post("/api/v2/dev/seed", response_model=SeedOut)
 def seed(token=Depends(authenticate), db: Session = Depends(session)):
-    if settings().env == "production" or not settings().allow_dev_auth:
+    if settings().env == "production" or not settings().allow_dev_auth or settings().identity_mode != "legacy-test":
         raise HTTPException(404, "Not found")
-    spaces = workspaces(db, token)
-    if not spaces:
-        raise HTTPException(403, "No workspace")
-    ws = spaces[0]["id"]; manager(db, token, ws)
+    # A development subject has one server-owned fixture space. Additional
+    # memberships and unordered directory results cannot redirect this seed.
+    ws = {"dev-admin": "ws-dev", "dev-reader": "ws-dev", "dev-other": "ws-other"}.get(token.user_id) if token.source == "development" else None
+    if ws is None:
+        raise HTTPException(403, "Registered development identity required")
+    manager(db, token, ws)
     db.execute(text("SELECT pg_advisory_xact_lock(9102202)"))
     fixtures = []
     for name, aliases, field in [("开发夹具：资料查询", ["查询资料", "资料查询"], "record_id"), ("开发夹具：记录列表", ["记录列表", "查询记录"], "category")]:
@@ -691,5 +804,16 @@ from .model_profiles_api import router as model_profiles_router
 app.include_router(model_profiles_router)
 from .demo_api import router as demo_router
 app.include_router(demo_router)
+from .zhiyu_api import router as zhiyu_router
+app.include_router(zhiyu_router)
 from .trace_api import router as trace_router
 app.include_router(trace_router)
+from .workspace_admin import router as workspace_admin_router
+app.include_router(workspace_admin_router)
+
+from .identity_api import router as identity_router
+app.include_router(identity_router)
+from .business_catalog import router as business_catalog_router
+app.include_router(business_catalog_router)
+from .conversation_logs import router as conversation_logs_router
+app.include_router(conversation_logs_router)

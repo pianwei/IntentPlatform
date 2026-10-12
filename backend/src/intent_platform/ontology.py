@@ -1,7 +1,7 @@
 """Finite JSON constraint compiler. Generated RDF is never a second source of truth."""
 import copy
 from urllib.parse import quote
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from rdflib import Graph, Namespace, BNode, Literal, URIRef
 from rdflib.namespace import RDF, XSD
 from rdflib.collection import Collection
@@ -124,10 +124,13 @@ def facts(values):
 
 def input_errors(schema, values):
     canonical = {**schema, "additionalProperties": False}
-    return [f"{'.'.join(map(str, e.path)) or 'input'}: {e.message}" for e in Draft202012Validator(canonical).iter_errors(values)]
+    return [f"{'.'.join(map(str, e.path)) or 'input'}: {e.message}" for e in Draft202012Validator(canonical, format_checker=FormatChecker()).iter_errors(values)]
 
 
 def validate_pair(schema, values):
+    from .finite_inputs import enhanced, validate_pair as nested_pair
+    if enhanced(schema):
+        return nested_pair(schema, values)
     python_ok = not input_errors(schema, values)
     rdf_ok, _, report = validate(facts(values), shacl_graph=shapes(schema))
     return python_ok, bool(rdf_ok), str(report)
@@ -141,7 +144,11 @@ def sample_value(spec):
         kind = next(k for k in kind if k != "null")
     if kind == "array":
         return [sample_value(spec["items"]) for _ in range(spec.get("minItems", 0))]
+    if kind == "object":
+        return {k: sample_value(v) for k, v in spec.get("properties", {}).items() if k in spec.get("required", [])}
     if kind == "string":
+        if spec.get("format") == "date": return "2026-01-02"
+        if spec.get("format") == "date-time": return "2026-01-02T04:00:00Z"
         return "x" * max(1, spec.get("minLength", 1)) if spec.get("maxLength", 1) else ""
     if kind in {"integer", "number"}:
         return spec.get("minimum", min(0, spec.get("maximum", 0)))

@@ -1,14 +1,15 @@
-import { useState, type FormEvent } from "react";
+import { useState, useEffect, type FormEvent } from "react";
 import {
   CheckCircle2,
   FileText,
   LoaderCircle,
   ShieldCheck,
 } from "lucide-react";
-import type { Choice, Field, Run, RuntimeEvent, RuntimeFile } from "../../shared/types";
-import { SafeMarkdown } from "../../shared/SafeMarkdown";
+import type { Choice, Field, Run, RuntimeEvent, RuntimeFile, RuntimeResultComponent } from "../../shared/types";
+import { BusinessResultContent, businessLabel, valueText } from "../../shared/BusinessResult";
 import { Badge, Notice } from "../../shared/ui";
 import { parseFieldValues, usesJsonInput } from "../../shared/fields";
+import { ValueInput } from "../../shared/SchemaValueInput";
 export const statuses: Record<string, string> = {
   RECEIVED: "已受理",
   ROUTING: "正在识别意图",
@@ -25,41 +26,6 @@ export function BindingSummary({ bindings }: { bindings: Run["bindings"] }) {
   if (!bindings?.length) return null;
   return <details className="binding-summary"><summary>业务对象已确认</summary>{bindings.map((binding, index) => <p key={index}>{binding.source === "history" ? "同会话历史结果" : binding.source === "resolver" ? "已授权业务对象" : "业务对象已确认"}</p>)}</details>;
 }
-function valueText(value: unknown) {
-  return value === null || value === undefined
-    ? "—"
-    : typeof value === "object"
-      ? JSON.stringify(value)
-      : String(value);
-}
-const businessLabels: Record<string, string> = {
-  customers: "客户", customer_id: "客户编号", name: "名称", city: "城市", masked_id: "证件标识",
-  accounts: "账户", account_id: "账户编号", label: "账户名称", currency: "币种",
-  balance: "余额", available: "可用余额", status: "状态", reason: "原因",
-  transactions: "交易", transaction_id: "交易编号", posted_on: "交易日期",
-  direction: "收支方向", amount: "金额", description: "说明",
-  income: "收入", expense: "支出", net: "净额", count: "笔数",
-  loans: "贷款合同", loan_id: "合同编号", product_name: "产品名称", outstanding: "剩余余额",
-  payments: "还款安排", due_on: "到期日", overdue: "逾期记录", days: "逾期天数",
-  products: "产品", product_id: "产品编号", category: "类别", holdings: "持仓",
-  holding_id: "持仓编号", units: "持有份额", tickets: "工单", ticket_id: "工单编号",
-  history: "处理记录", risk_level: "风险等级", as_of: "登记日期", segment: "客户分类",
-};
-function businessLabel(name: string) { return businessLabels[name] ?? name; }
-function duration(value: number | null | undefined) {
-  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(0)} ms` : "未记录";
-}
-export function RuntimeProcessingSummary({ run }: { run: Run | null }) {
-  if (!run || !run.steps?.length) return null;
-  const timing = run.timing;
-  return <details className="binding-summary"><summary>处理记录 · {run.steps.length} 步 · 总耗时 {duration(timing?.total_ms)}</summary>
-    <p className="muted small">处理 {duration(timing?.processing_ms)} · 等待补充或确认 {duration(timing?.user_wait_ms)}</p>
-    <ol>{run.steps.map((step, index) => <li key={`${index}-${step.name}`}><strong>{step.name}</strong> · {statuses[step.status] ?? step.status} · {duration(step.elapsed_ms)}
-      {Object.keys(step.input ?? {}).length > 0 && <details><summary>输入</summary><dl className="detail-grid">{Object.entries(step.input).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{valueText(value)}</dd></div>)}</dl></details>}
-      {step.output !== null && step.output !== undefined && <details><summary>输出</summary><pre>{valueText(step.output)}</pre></details>}
-    </li>)}</ol>
-  </details>;
-}
 export function canInteract(event: RuntimeEvent, run: Run | null) {
   return (
     !!run &&
@@ -69,6 +35,13 @@ export function canInteract(event: RuntimeEvent, run: Run | null) {
       (event.event_type === "CONFIRMATION" &&
         run.status === "WAITING_CONFIRMATION"))
   );
+}
+const finalComponentKinds = new Set(["table", "detail", "citation", "text", "markdown"]);
+function finalComponent(value: unknown): value is RuntimeResultComponent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.title === "string" && typeof item.component === "string" && finalComponentKinds.has(item.component)
+    && (item.fields === undefined || Array.isArray(item.fields) && item.fields.every(field => !!field && typeof field === "object" && typeof field.label === "string"));
 }
 export function ResultCard({
   event,
@@ -89,8 +62,10 @@ export function ResultCard({
 }) {
   const data = event.payload;
   const [values, setValues] = useState<Record<string, string>>({});
+  const [typedValues,setTypedValues]=useState<Record<string,unknown>>({});
   const [formError, setFormError] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
+  useEffect(()=>{setValues({});setTypedValues({});setFormError("");},[event.run_id,event.revision,event.payload.question_id]);
   const active = canInteract(event, run) && !busy;
   if (event.event_type === "STATUS")
     return (
@@ -121,9 +96,10 @@ export function ResultCard({
       e.preventDefault();
       setFormError("");
       try {
+        for(const field of fields)if(field.schema&&field.required&&typedValues[field.name]===undefined)throw new Error(`请填写 ${field.label||field.name}`);
         await onAction(event, "answers", {
           question_id: data.question_id,
-          values: parseFieldValues(fields, values),
+          values: {...parseFieldValues(fields.filter(field=>!field.schema), values),...typedValues},
         });
       } catch (error) {
         setFormError(error instanceof Error ? error.message : "参数格式有误");
@@ -167,7 +143,7 @@ export function ResultCard({
                 {data.errors.map(String).join("；")}
               </p>
             )}
-            {fields.map((field) => (
+            {fields.map((field) => field.schema ? <fieldset key={field.name} disabled={!active}><ValueInput field={{...field.schema,title:field.label||field.name}} value={typedValues[field.name]} name={field.name} labelPrefix="业务参数" required={field.required} change={value=>setTypedValues(previous=>{const next={...previous};if(value===undefined)delete next[field.name];else next[field.name]=value;return next;})}/></fieldset> : (
               <label key={field.name}>
                 {field.label || field.name}
                 {field.unit && !(field.label ?? "").includes(field.unit) ? `（${field.unit}）` : ""}
@@ -270,33 +246,14 @@ export function ResultCard({
       </section>
     );
   if (event.event_type !== "RESULT") return null;
-  const result = data.data;
   const component = String(data.component ?? "detail");
-  const resultObject = result && typeof result === "object" && !Array.isArray(result)
-    ? result as Record<string, unknown> : null;
-  const namedRows = resultObject && Object.entries(resultObject).find(([, value]) =>
-    Array.isArray(value) && value.every(item => item !== null && typeof item === "object" && !Array.isArray(item)));
-  const rows = Array.isArray(result)
-    ? result
-    : resultObject && Array.isArray(resultObject.rows)
-      ? resultObject.rows
-      : namedRows
-      ? namedRows[1] as unknown[]
-      : null;
-  const fields = Array.isArray(data.fields)
-    ? (data.fields as { label: string; value: unknown }[])
-    : result && typeof result === "object" && !Array.isArray(result)
-      ? Object.entries(result).map(([label, value]) => ({ label, value }))
-      : [{ label: "结果", value: result }];
-  const tableRows = rows?.filter(
-    (row): row is Record<string, unknown> =>
-      row !== null && typeof row === "object" && !Array.isArray(row),
-  );
-  const columns = tableRows
-    ? Array.from(new Set(tableRows.flatMap((row) => Object.keys(row))))
-    : [];
+  const components = Array.isArray(data.components) ? data.components.filter(finalComponent) : [];
+  const details = <div className="final-result-components">{components.map((item, index) => <section className="final-result-component" key={`${index}-${item.title}`}>
+    <h4>{item.title}</h4><BusinessResultContent data={{ component: item.component, data: item.data, fields: item.fields }} />
+  </section>)}</div>;
   return (
-    <section className="result-card">
+    <section className={`result-card business-result result-${component}`}>
+      {typeof data.answer_source === "string" && ["business", "model", "practice", "mixed"].includes(data.answer_source) && <div className="answer-source">{{ business: "业务结果", model: "模型回答", practice: "模拟陪练", mixed: "业务结果与解释" }[data.answer_source]}</div>}
       <header>
         <CheckCircle2 size={18} />
         <h3>{String(data.title ?? "业务结果")}</h3>
@@ -304,48 +261,8 @@ export function ResultCard({
           {statuses[String(data.status)] || String(data.status ?? "已返回")}
         </Badge>
       </header>
-      {data.result_unavailable === true ? (
-        <p className="result-text" role="status">业务操作已确认成功，但返回内容未通过已发布的展示契约。请按调用记录核对结果；此处不会重新提交业务。</p>
-      ) : component === "table" && tableRows ? (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                {columns.map((column) => (
-                  <th key={column}>{businessLabel(column)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {tableRows.map((row, index) => (
-                <tr key={index}>
-                  {columns.map((column) => (
-                    <td key={column}>{valueText(row[column])}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!tableRows.length && (
-            <p className="muted">接口已返回，暂无结果行。</p>
-          )}
-        </div>
-      ) : component === "file" ? null : component === "markdown" ? (
-        <SafeMarkdown text={valueText(result)} />
-      ) : component === "citation" ? (
-        <div className="citation-result"><SafeMarkdown text={typeof result === "string" ? result : valueText(result)} /><p className="muted small">仅展示服务端准许的引用内容；文件通过授权下载读取。</p></div>
-      ) : component === "text" ? (
-        <p className="result-text">{valueText(result)}</p>
-      ) : (
-        <dl className="detail-grid">
-          {fields.map((field, index) => (
-            <div key={`${field.label}-${index}`}>
-              <dt>{businessLabel(field.label)}</dt>
-              <dd>{valueText(field.value)}</dd>
-            </div>
-          ))}
-        </dl>
-      )}
+      <BusinessResultContent data={data} />
+      {data.result_unavailable !== true && components.length > 0 && details}
       {data.result_unavailable !== true && (component === "file" || (Array.isArray(data.files) && data.files.length > 0)) && (
         <div className="runtime-files">
           {formError && <Notice kind="error">{formError}</Notice>}
@@ -359,7 +276,7 @@ export function ResultCard({
       <footer className="provenance">
         已返回业务结果
         {Boolean(data.fixture_mode) && (
-          <Badge tone="warning">开发夹具结果</Badge>
+          <Badge tone="warning">模拟结果</Badge>
         )}
       </footer>
     </section>

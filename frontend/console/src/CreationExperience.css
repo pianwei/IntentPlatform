@@ -1,0 +1,75 @@
+:root { --muted:#626b7a; --accent:#5856d6; --accent-soft:#f0effc; --surface:#f7f8fb; --line:#e7e9f0; }
+.console-modern,.task-surface,.modal-body { font-size:calc(.875rem * var(--text-scale,1)); }
+input:not([type=checkbox]):not([type=radio]):not([type=color]),select,textarea,label,.button,.select-trigger,table,td,.primary-nav button,.sidebar-bottom>button { font-size:calc(.875rem * var(--text-scale,1)); }
+.task-surface { color:var(--text); background:white; padding:0; border:1px solid var(--border); border-radius:16px; font-family:inherit; }
+.task-surface:not([open]) { display:none; }
+.task-dialog { width:720px; max-width:calc(100vw - 48px); max-height:calc(100dvh - 48px); margin:auto; box-shadow:0 32px 100px #25264035; display:flex; flex-direction:column; overflow:visible; }
+.task-dialog.task-wide { width:960px; }
+.task-dialog::backdrop { background:#20253870; backdrop-filter:blur(3px); }
+.task-page { position:relative; inset:auto; width:100%; max-width:1120px; max-height:none; margin:0 auto; display:block; border:0; border-radius:0; }
+.task-heading { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:22px 28px; border-bottom:1px solid var(--line); flex-shrink:0; background:white; border-radius:inherit; }
+.task-heading h2 { font-size:calc(1.2rem * var(--text-scale,1)); margin-top:5px; }
+.task-context { color:var(--muted); font-size:calc(.75rem * var(--text-scale,1)); }
+.task-heading-actions { display:flex; align-items:center; gap:18px; }
+.task-content { overflow:auto; padding:24px 28px 0; min-height:0; border-radius:0 0 16px 16px; }
+.task-page .task-heading { position:sticky; top:-32px; z-index:8; padding-left:0; padding-right:0; }
+.task-page .task-content { padding-left:0; padding-right:0; overflow:visible; }
+.task-content .functional-editor { display:block; padding:0; }
+.task-content .function-guide { display:none; }
+.task-content .function-main { max-width:none; min-width:0; }
+.task-content .form-section { padding:0; border:0; box-shadow:none; margin:22px 0; }
+.task-content .editor-footer { position:sticky; bottom:0; z-index:6; padding:18px 0; background:white; margin:20px 0 0; border-top:1px solid var(--line); flex-wrap:wrap; }
+.task-content .editor-footer>span { color:var(--muted); font-size:calc(.75rem * var(--text-scale,1)); flex:1; }
+.task-confirm { padding:10px 0 30px; }
+.task-confirm p { margin:12px 0 20px; }
+.agent-create .capability-picker { margin-top:24px; }
+.task-content .capability-picker-list { max-height:320px; }
+.model-cards { display:grid; grid-template-columns:1fr; gap:12px; }
+.model-card { display:flex; align-items:center; gap:18px; padding:22px 24px; border:1px solid var(--line); border-radius:12px; background:white; }
+.model-card:hover { border-color:#c9c8e4; }
+.model-card-icon { width:44px; height:44px; display:grid; place-items:center; background:var(--accent-soft); color:var(--accent); border-radius:12px; flex-shrink:0; }
+.model-card-main { flex:1; min-width:0; }
+.model-card h2 button { border:0; background:none; font:inherit; padding:0; text-align:left; overflow-wrap:anywhere; }
+.model-card p { color:var(--muted); margin:7px 0 10px; font-size:calc(.875rem * var(--text-scale,1)); overflow-wrap:anywhere; }
+.model-card p span { margin:0 6px; }
+.model-card-status { display:flex; gap:12px; align-items:center; flex-wrap:wrap; color:var(--muted); font-size:calc(.75rem * var(--text-scale,1)); }
+.model-card-status>span { display:flex; align-items:center; gap:5px; }
+.model-editor .field { margin-bottom:20px; }
+.model-editor details { border-top:1px solid var(--line); margin-top:18px; }
+.model-editor .editor-footer { justify-content:flex-end; }
+.model-settings>.empty { text-align:center; padding:80px 20px; color:var(--muted); }
+.model-settings>.empty h3 { margin:16px 0 8px; color:var(--text); }
+.application-capability-workspace { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; max-width:1040px; }
+.application-capability-workspace>.application-settings { border:0; padding:0; }
+.application-capability-workspace>.application-settings .capability-picker { margin-top:28px; }
+.application-capability-workspace .capability-picker-list { max-height:none; }
+.application-capability-workspace>div>.application-settings { border-radius:10px; padding:18px 20px; }
+.draft-trial-note { font-size:calc(.75rem * var(--text-scale,1)); color:var(--muted); margin:-5px 0 16px; }
+.application-editor-header { flex-wrap:wrap; }
+.application-editor-header>div:first-of-type { flex-basis:200px; }
+.text-size-control { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:12px 0; border:0; }
+.text-size-control button { border:1px solid var(--border); background:white; border-radius:7px; padding:8px 14px; }
+.text-size-control button[aria-pressed=true] { color:var(--accent); background:var(--accent-soft); border-color:#aaa9e9; }
+.domain-inline { position:static; padding:0; background:white; }
+.domain-inline .domain-editor { width:100%; max-width:none; max-height:none; box-shadow:none; border:0; padding:0; overflow:visible; }
+.domain-inline .domain-editor>header { background:white; padding:18px 0; }
+.domain-inline .domain-editor>footer { position:sticky; bottom:0; background:white; padding:18px 0; }
+.log-content>.resource-content { height:100%; min-height:0; display:flex; flex-direction:column; }
+.log-content>.resource-content>.run-trace-page { flex:1; min-height:0; }
+.ui-popover,.ui-menu { max-height:calc(100dvh - 40px); overflow-y:auto; }
+.agent-description,.agent-stats,.collection-footer,.table-title small,.filter-tabs button span { color:var(--muted); }
+.modal { width:720px; }
+@media(max-width:760px) {
+ .task-dialog,.task-dialog.task-wide { width:100vw; max-width:100vw; height:100dvh; max-height:100dvh; margin:0; border:0; border-radius:0; }
+ .task-heading { padding:17px 18px; gap:10px; }
+ .task-heading-actions { gap:9px; }
+ .task-content { padding:18px 18px 0; }
+ .task-content .editor-footer { gap:8px; }
+ .task-content .editor-footer>span { flex-basis:100%; }
+ .task-page .task-heading { top:-24px; }
+ .model-card { padding:17px; gap:12px; flex-wrap:wrap; }
+ .model-card-main { flex-basis:calc(100% - 70px); }
+ .application-editor-header>div:first-of-type { flex-basis:calc(100% - 50px); }
+ .application-editor-header .badge { margin-left:0; }
+ .application-tabs { gap:22px; }
+}

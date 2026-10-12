@@ -11,6 +11,6 @@
 .planning-fields { display: grid; gap: 12px; }
 .planning-fields label { display: grid; gap: 6px; font-weight: 600; }
 .planning-fields input, .planning-fields select, .planning-fields textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 9px 11px; border: 1px solid #dbe2ec; border-radius: 8px; }
-.planning-fields .planning-code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.planning-fields .planning-code { font-family: ui-monospace, Consolas, monospace; font-size:calc(0.75rem * var(--text-scale, 1)); }
 .planning-editor .button-row { display: flex; gap: 10px; margin-top: 18px; }
 @media (max-width: 1100px) { .planning-columns { grid-template-columns: 1fr; } .planning-seed { align-items: start; flex-direction: column; } }

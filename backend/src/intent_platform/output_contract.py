@@ -14,19 +14,23 @@ MAX_ITEMS = 100
 MAX_STRING = 16_000
 FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 ROOT_KEYS = {"type", "properties", "required", "additionalProperties", "title", "description"}
-VALUE_KEYS = {"type", "maxLength", "minLength", "minimum", "maximum", "enum", "title", "description", "items", "maxItems", "minItems", "properties", "required", "additionalProperties"}
+VALUE_KEYS = {"type", "maxLength", "minLength", "minimum", "maximum", "enum", "title", "description", "examples", "format", "items", "maxItems", "minItems", "properties", "required", "additionalProperties"}
 
 
 class OutputContractError(ValueError):
     """Do not include raw values or connector diagnostics in this exception."""
 
 
-def _shape(spec, depth=0):
+def _shape(spec, depth=0, max_object_depth=2, max_array_depth=1):
     if not isinstance(spec, dict) or set(spec) - VALUE_KEYS:
         raise ValueError("Output schema has unsupported keywords")
     kind = spec.get("type")
+    if "examples" in spec and (not isinstance(spec["examples"], list) or len(spec["examples"]) > 5 or len(json.dumps(spec["examples"], ensure_ascii=False).encode("utf-8")) > 16000):
+        raise ValueError("Output examples must be finite metadata")
+    if "format" in spec and (kind != "string" or spec["format"] not in {"date", "date-time"}):
+        raise ValueError("Only string date/date-time output formats are supported")
     if kind == "object":
-        if depth > 2 or spec.get("additionalProperties") is not False:
+        if depth > max_object_depth or spec.get("additionalProperties") is not False:
             raise ValueError("Output objects must be bounded and closed")
         props = spec.get("properties")
         required = spec.get("required", [])
@@ -39,15 +43,15 @@ def _shape(spec, depth=0):
         if set(spec) & {"items", "maxItems", "minItems", "maxLength", "minLength", "minimum", "maximum", "enum"}:
             raise ValueError("Output object has scalar/array constraints")
         for child in props.values():
-            _shape(child, depth + 1)
+            _shape(child, depth + 1, max_object_depth, max_array_depth)
     elif kind == "array":
-        if depth > 1 or type(spec.get("maxItems")) is not int or not 0 <= spec["maxItems"] <= MAX_ITEMS:
+        if depth > max_array_depth or type(spec.get("maxItems")) is not int or not 0 <= spec["maxItems"] <= MAX_ITEMS:
             raise ValueError("Output arrays need an explicit maxItems at most 100")
         if type(spec.get("minItems", 0)) is not int or not 0 <= spec.get("minItems", 0) <= spec["maxItems"]:
             raise ValueError("Output array minimum is invalid")
         if set(spec) & {"properties", "required", "additionalProperties", "maxLength", "minLength", "minimum", "maximum", "enum"}:
             raise ValueError("Output array has object/scalar constraints")
-        _shape(spec.get("items"), depth + 1)
+        _shape(spec.get("items"), depth + 1, max_object_depth, max_array_depth)
     elif kind in {"string", "integer", "number", "boolean"}:
         if set(spec) & {"items", "maxItems", "minItems", "properties", "required", "additionalProperties"}:
             raise ValueError("Output scalar has object/array constraints")
@@ -83,7 +87,16 @@ def check_output_contract(definition):
     schema = definition.get("output_schema")
     if not isinstance(schema, dict) or set(schema) - ROOT_KEYS or schema.get("type") != "object":
         raise ValueError("New non-fixture versions require a finite output_schema object")
-    _shape(schema)
+    # One composite wrapper and a finite foreach may add at most two levels to
+    # the existing approved direct contract; byte/item limits remain unchanged.
+    _shape(schema, max_object_depth=4, max_array_depth=3) if definition.get("execution_kind") == "composite" else _shape(schema)
+    if definition.get("output_mode", "fields") == "none":
+        presentation = definition.get("presentation") or {}
+        if (schema.get("properties") or schema.get("required") or schema.get("additionalProperties") is not False
+                or presentation.get("field_map") or presentation.get("files_field") is not None
+                or definition.get("result_bindings") or (definition.get("composite") or {}).get("final_output_mapping")):
+            raise ValueError("No-output functions require a closed empty schema and no result, file or composite mappings")
+        return schema
     presentation = definition.get("presentation") or {}
     if not isinstance(presentation, dict):
         raise ValueError("Presentation must be an explicit mapping")
@@ -135,6 +148,10 @@ def _project(spec, value):
         raise OutputContractError("Result does not match approved output contract")
     if kind == "string" and not spec.get("minLength", 0) <= len(value) <= spec["maxLength"]:
         raise OutputContractError("Result does not match approved output contract")
+    if kind == "string" and spec.get("format"):
+        from jsonschema import FormatChecker
+        if not FormatChecker().conforms(value, spec["format"]):
+            raise OutputContractError("Result does not match approved output contract")
     if "minimum" in spec and value < spec["minimum"] or "maximum" in spec and value > spec["maximum"] or "enum" in spec and value not in spec["enum"]:
         raise OutputContractError("Result does not match approved output contract")
     return value
@@ -147,6 +164,10 @@ def project_output(definition, raw):
     in errors, even when a connector supplies a malformed object.
     """
     schema = check_output_contract(definition)
+    if definition.get("output_mode", "fields") == "none":
+        # The remote state was already classified by the connector. Its body is
+        # not approved display data, even if malformed or non-JSON.
+        return {}, None
     data = _project(schema, raw)
     try:
         size = len(json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))

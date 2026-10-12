@@ -92,3 +92,22 @@ def test_file_field_is_explicit_and_cannot_be_display_data():
     d["presentation"]["field_map"]["Files"] = "files"
     with pytest.raises(ValueError, match="Inline files"):
         check_output_contract(d)
+
+
+def test_no_output_contract_discards_unapproved_remote_payload():
+    from intent_platform.schemas import Definition
+
+    draft = Definition(
+        authoring_version="function-v2", name="办理完成通知", description="只返回执行状态",
+        output_mode="none",
+        input_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        output_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        presentation={"field_map": {}},
+    ).model_dump()
+    assert check_output_contract(draft) == draft["output_schema"]
+    assert project_output(draft, {"secret": "never-visible", "account": "synthetic"}) == ({}, None)
+
+    with pytest.raises(ValueError, match="no result"):
+        check_output_contract({**draft, "result_bindings": [{"collection_path": "rows", "id_field": "id", "label_field": "name"}]})
+    with pytest.raises(ValueError, match="no result"):
+        check_output_contract({**draft, "composite": {"final_output_mapping": {"result": {"$step": "step", "path": "value"}}}})

@@ -49,6 +49,10 @@ class Presentation(StrictModel):
 
 
 class Definition(StrictModel):
+    authoring_version: Literal["legacy", "function-v2"] = "legacy"
+    output_examples: list[dict] = Field(default_factory=list, max_length=5)
+    execution_kind: Literal["direct", "composite"] = "direct"
+    composite: dict | None = None
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(min_length=1, max_length=12000)
     object_type: str = "local:Object"
@@ -57,6 +61,7 @@ class Definition(StrictModel):
     aliases: list[str] = Field(default_factory=list)
     input_schema: dict = Field(default_factory=lambda: {"type": "object", "properties": {}, "additionalProperties": False})
     output_schema: dict | None = None
+    output_mode: Literal["fields", "none"] = "fields"
     connector: Connector = Field(default_factory=Connector)
     effect: Literal["READ_ONLY", "WRITE"] = "READ_ONLY"
     requires_confirmation: bool = False
@@ -78,8 +83,18 @@ class Definition(StrictModel):
 
     @model_validator(mode="after")
     def write_confirmation(self):
+        if self.execution_kind == "composite":
+            from .agent_projection import CompositeDefinition
+            if self.composite is None:
+                raise ValueError("Composite function requires a pinned rule and dependencies")
+            self.composite = CompositeDefinition.model_validate(self.composite).model_dump(by_alias=True)
+        elif self.composite is not None:
+            raise ValueError("Direct function cannot contain a composite rule")
         if self.effect == "WRITE":
             self.requires_confirmation = True
+        if self.output_mode == "none":
+            from .output_contract import check_output_contract
+            check_output_contract(self.model_dump())
         return self
 
 
@@ -99,6 +114,8 @@ class ValidateBody(StrictModel):
     probe: bool = False
     allow_effects: bool = False
     failure_arguments: dict | None = None
+    model_profile_id: str | None = None
+    test_goal: str | None = Field(default=None, max_length=2000)
 
 
 class AgentBody(StrictModel):
@@ -114,9 +131,12 @@ class AgentBody(StrictModel):
     planning_enabled: bool = False
     business_skill_ids: list[str] = Field(default_factory=list, max_length=32)
     model_profile_id: str | None = None
+    routing_strategy: Literal["legacy", "three-layer-v1"] = "legacy"
 
     @model_validator(mode="after")
     def origins(self):
+        self.name = self.name.strip()
+        if not self.name: raise ValueError("Agent name is required")
         if len(set(self.capability_ids)) != len(self.capability_ids):
             raise ValueError("Duplicate capability IDs")
         if len(set(self.business_skill_ids)) != len(self.business_skill_ids):
@@ -146,6 +166,7 @@ class ConfirmationBody(StrictModel):
 
 
 class EmbedBody(StrictModel):
+    visitor_id: str | None = Field(default=None, min_length=16, max_length=256)
     agent_id: str
     host_origin: str
     instance_nonce: str | None = None

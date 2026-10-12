@@ -9,9 +9,9 @@ from .trust import Delegation, Integration, ROLES
 
 def validate_authority_catalogs(cfg):
     try:
-        integrations = json.loads(cfg.integrations_json)
-        memberships = json.loads(cfg.membership_grants_json)
-        if not isinstance(integrations, dict) or not integrations or not isinstance(memberships, dict) or not memberships:
+        integrations = {} if cfg.identity_mode == "local" else json.loads(cfg.integrations_json)
+        memberships = {} if cfg.identity_mode == "local" else json.loads(cfg.membership_grants_json)
+        if not isinstance(integrations, dict) or not isinstance(memberships, dict) or (cfg.identity_mode != "local" and (not integrations or not memberships)):
             raise ValueError("Empty trusted authority catalog")
         for ref, raw in integrations.items():
             if not isinstance(ref, str) or not ref.strip() or ref == "development":

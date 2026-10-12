@@ -2,7 +2,7 @@ from functools import lru_cache
 import ipaddress
 import json
 from urllib.parse import urlsplit
-from pydantic import model_validator
+from pydantic import model_validator, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from .origins import exact_origin
@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     env: str = "development"
     database_url: str = "postgresql+psycopg://intent_app:local-app-only@127.0.0.1:54329/intent"
     migration_database_url: str = "postgresql+psycopg://intent_owner:local-owner-only@127.0.0.1:54329/intent"
-    allow_dev_auth: bool = True
+    allow_dev_auth: bool = False
+    identity_mode: str = "local"
+    refresh_seconds: int = 604800
+    anonymous_seconds: int = 604800
     model_mode: str = "fixture"
     model_url: str = ""
     model_name: str = "development-deterministic-v1"
@@ -88,8 +91,17 @@ class Settings(BaseSettings):
     workspace_timezones_json: str = "{}"
     integrations_json: str = "{}"
     membership_grants_json: str = "{}"
+    # Server-controlled principals; these fields are never writable by Console.
+    identity_directory_json: str | None = None
+    platform_admins_json: str | None = None
     workspace_limits_json: str = "{}"
     allow_shadow_evaluation: bool = False
+
+    @field_validator("identity_directory_json", "platform_admins_json", mode="before")
+    @classmethod
+    def absent_directory_configuration(cls, value):
+        # Compose passes unset optional configuration as an empty string.
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def safety(self):
@@ -97,6 +109,25 @@ class Settings(BaseSettings):
             raise ValueError("Only PostgreSQL with psycopg is supported")
         if self.env not in {"development", "test", "production"}:
             raise ValueError("Unknown environment")
+        try:
+            directory = json.loads(self.identity_directory_json if self.identity_directory_json is not None else "{}")
+            administrators = json.loads(self.platform_admins_json if self.platform_admins_json is not None else "[]")
+            valid_id = lambda value: isinstance(value, str) and 0 < len(value) <= 160 and value == value.strip() and not any(ord(c) < 32 for c in value)
+            if not isinstance(directory, dict) or len(directory) > 1000 or any(not valid_id(user) or not isinstance(label, str) or not 0 < len(label.strip()) <= 160 for user, label in directory.items()):
+                raise ValueError()
+            if not isinstance(administrators, list) or len(administrators) > 100 or any(not valid_id(user) for user in administrators) or len(set(administrators)) != len(administrators):
+                raise ValueError()
+            known = set(directory)
+            if self.env in {"development", "test"} and self.allow_dev_auth and self.identity_directory_json is None:
+                known.update({"dev-admin", "dev-reader", "dev-other"})
+            if self.identity_mode == "legacy-test" and set(administrators) - known:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ValueError("Invalid server identity directory or platform administrator configuration") from None
+        if self.identity_mode not in {"local", "legacy-test"} or (self.identity_mode == "legacy-test" and self.env != "test"):
+            raise ValueError("Legacy identity is restricted to explicit tests")
+        if not 300 <= self.refresh_seconds <= 2592000 or not 300 <= self.anonymous_seconds <= 2592000:
+            raise ValueError("Identity recovery lifetimes must be between five minutes and thirty days")
         if self.model_mode not in {"fixture", "openai"}:
             raise ValueError("model_mode must be fixture or openai")
         if self.allow_public_deepseek_model_test and self.env != "development":
@@ -107,7 +138,7 @@ class Settings(BaseSettings):
             if self.allow_dev_auth or self.model_mode == "fixture":
                 raise ValueError("Production forbids development identity and fixture model")
             missing = [name for name in PRODUCTION_REQUIRED
-                       if name not in self.model_fields_set or not str(getattr(self, name) or "").strip()]
+                       if (self.identity_mode != "local" or name not in {"identity_introspection_url", "identity_service_key", "integrations_json", "membership_grants_json"}) and (name not in self.model_fields_set or not str(getattr(self, name) or "").strip())]
             if missing:
                 raise ValueError("Production configuration is incomplete: " + ", ".join(missing))
             runtime = _database_role(self.database_url)
@@ -120,7 +151,7 @@ class Settings(BaseSettings):
             if (not allowed or len(allowed) != len(set(allowed)) or
                     any(not host or "*" in host or "/" in host or _unsafe_production_host(host) for host in allowed)):
                 raise ValueError("Production requires exact non-local outbound hosts")
-            for endpoint in (self.model_url, self.identity_introspection_url, self.object_authorization_url):
+            for endpoint in (self.model_url, self.object_authorization_url):
                 _production_endpoint(endpoint, set(allowed))
             origins = [origin.strip() for origin in self.cors_origins.split(",")]
             if not origins or len(origins) != len(set(origins)):
@@ -131,7 +162,7 @@ class Settings(BaseSettings):
                     raise ValueError("Unsafe production origin")
             except ValueError:
                 raise ValueError("Production requires exact HTTPS browser origins") from None
-            for name in ("integrations_json", "membership_grants_json"):
+            for name in (() if self.identity_mode == "local" else ("integrations_json", "membership_grants_json")):
                 try:
                     catalog = json.loads(getattr(self, name))
                     if not isinstance(catalog, dict) or not catalog:

@@ -30,12 +30,14 @@ def test_unit_identifier_and_conversion_overflow_are_rejected():
     assert parameter_pair(d, {"amount": 1e308}, {"amount": "mm"}, projection, datetime.now(timezone.utc), "UTC") == (False, False)
 
 
-def test_optional_business_binding_and_unknown_trusted_facts_are_rejected():
+def test_optional_business_binding_is_supported_without_weakening_required_inputs_or_trusted_facts():
     d = semantic_definition(); projection = compile_domain(domain_definition())
     d["input_schema"] = {"type": "object", "properties": {"id": {"type": "string"}}}
     d["argument_bindings"] = {"id": {"role": "target", "resolver_ref": "fixture@1"}}
     assert compile_definition(d, projection=projection)["compiler_version"] == "finite-json-v2"
     d["participant_roles"][0].update({"required": False, "min_count": 0})
+    assert compile_definition(d, projection=projection)["compiler_version"] == "finite-json-v2"
+    d["input_schema"]["required"] = ["id"]
     with pytest.raises(ValueError, match="Entity bindings"): compile_definition(d, projection=projection)
     d["participant_roles"][0].update({"required": True, "min_count": 1})
     d["trusted_preconditions"] = {"fact": "entity.unknown.authorized", "operator": "exists"}

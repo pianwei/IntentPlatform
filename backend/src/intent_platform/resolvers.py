@@ -67,6 +67,15 @@ def connector_for(profile):
 
 
 def resolver_profile(reference, workspace_id):
+    if reference.startswith("zhiyu.entity.") and reference.endswith("@1") and settings().env != "production":
+        from .zhiyu import domain_definition
+        entity_type = "zhiyu:" + reference[len("zhiyu.entity."):-2]
+        if any(item["id"] == entity_type for item in domain_definition()["concepts"]):
+            return {"kind": "zhiyu", "version": "1", "workspace_ids": [workspace_id], "entity_type": entity_type}
+    if reference.startswith("demo.entity.") and reference.endswith("@1") and settings().env != "production":
+        entity = reference[len("demo.entity."):-2]
+        if entity in {"Customer", "Account", "Transaction", "Loan", "Product", "Holding", "Ticket"}:
+            return {"kind": "demo", "version": "1", "workspace_ids": [workspace_id], "entity_type": "demo:" + entity}
     raw = json.loads(settings().resolvers_json).get(reference)
     if not raw:
         raise ValueError("Trusted resolver reference is not configured")
@@ -100,10 +109,24 @@ def check_pinned_profiles(profiles, workspace_id):
         return False
 
 
-def resolve(reference, pinned, workspace_id, user_id, query, selected_id=None):
+def resolve(reference, pinned, workspace_id, user_id, query, selected_id=None, *, persona_id=None):
     current = resolver_profile(reference, workspace_id)
     if current != pinned:
         raise ValueError("Pinned resolver configuration is unavailable")
+    if current.get("kind") == "demo":
+        return _resolve_demo(current["entity_type"], workspace_id, user_id, query, selected_id)
+    if current.get("kind") == "zhiyu":
+        from sqlalchemy.orm import Session
+        from .db import engine, set_identity
+        from .models import SyntheticState
+        from .synthetic_runtime import CATALOG_ID
+        from .zhiyu import resolve as resolve_synthetic
+        with Session(engine) as db:
+            set_identity(db, user_id)
+            state = db.get(SyntheticState, (workspace_id, CATALOG_ID))
+            if not state or persona_id is None:
+                raise ResolverUnavailable("Synthetic session or catalog is unavailable")
+            return resolve_synthetic(current["entity_type"], state.state, persona_id, query, selected_id)
     connector = connector_for(current)
     secret = credential(connector["credential_ref"], workspace_id, connector)
     budget = _budget.get()
@@ -140,3 +163,34 @@ def resolve(reference, pinned, workspace_id, user_id, query, selected_id=None):
     if selected_id:
         candidates = [x for x in candidates if x["id"] == selected_id]
     return candidates
+
+
+def _resolve_demo(entity_type, workspace_id, user_id, query, selected_id):
+    from sqlalchemy.orm import Session
+    from .db import engine, set_identity
+    from .models import DemoState
+    from .demo.engine import authorize_operation, authorized_customers
+    collections = {"Customer": ("customers", "customer_id"), "Account": ("accounts", "account_id"),
+                   "Transaction": ("transactions", "transaction_id"), "Loan": ("loans", "loan_id"),
+                   "Product": ("products", "product_id"), "Holding": ("holdings", "holding_id"), "Ticket": ("tickets", "ticket_id")}
+    with Session(engine) as db:
+        set_identity(db, user_id)
+        record = db.get(DemoState, workspace_id)
+        if not record: return []
+        state = record.state
+        collection, key = collections[entity_type.split(":")[-1]]
+        source = state[collection]
+        rows = source.values() if isinstance(source, dict) else source
+        result = []
+        for row in rows:
+            identifier = row[key]
+            if selected_id and identifier != selected_id: continue
+            label = " · ".join(str(row[x]) for x in ("name", "label", "city", key) if row.get(x))
+            if not selected_id and str(query).lower() not in label.lower(): continue
+            try:
+                authorize_operation("demo.entity", {key: identifier}, state, user_id)
+                if row.get("customer_id") and row["customer_id"] not in authorized_customers(user_id, state): continue
+            except PermissionError:
+                continue
+            result.append({"id": identifier, "label": label, "type": entity_type, "authorized": True})
+        return result[:20]

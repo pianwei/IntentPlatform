@@ -16,6 +16,10 @@ export function runtimeUI(agent?: Pick<Agent, "name" | "suggested_questions" | "
 export function appPath(publicId: string, embedded = false) {
   return `/${embedded ? "embed" : "chat"}/${encodeURIComponent(publicId)}`;
 }
+export function canOpenPublishedChat(agent?: Pick<Agent, "current_release_id" | "published_channels" | "live_channels"> | null) {
+  // Draft channel edits do not change the currently published entry point.
+  return !!agent?.current_release_id && agent.published_channels?.chat === true && agent.live_channels?.chat === true;
+}
 export function applicationRoute(path: string) {
   const match = path.match(/^\/(chat|embed)\/([^/]+)\/?$/);
   if (!match) return null;
@@ -43,13 +47,39 @@ export function saveLocator(key: string, value: SessionLocator) {
 }
 export function clearLocator(key: string) { try { sessionStorage.removeItem(key); } catch { /* no storage */ } }
 
+// Anonymous recovery is a narrowly scoped secret, separate from in-memory access tokens.
+// Embedded applications never read or write this credential.
+export type AnonymousRecovery = { runtime_session_id?: string; recovery_secret?: string; demo_persona?: string };
+function anonymousKey(publicId: string, persona?: string) { return `intent.anonymous.${publicId}${persona ? `.persona.${persona}` : ""}`; }
+export function readAnonymous(publicId: string, persona?: string): AnonymousRecovery {
+  try { const v=JSON.parse(localStorage.getItem(anonymousKey(publicId, persona))||"{}");
+    return typeof v.runtime_session_id==="string"&&typeof v.recovery_secret==="string" ? {
+      runtime_session_id: v.runtime_session_id, recovery_secret: v.recovery_secret,
+      ...(typeof v.demo_persona === "string" ? { demo_persona: v.demo_persona } : {}),
+    } : {};
+  } catch { return {}; }
+}
+export function saveAnonymous(publicId: string, runtimeSessionId: string, recoverySecret: string, persona?: string) {
+  try {
+    const value = JSON.stringify({runtime_session_id:runtimeSessionId,recovery_secret:recoverySecret,...(persona ? {demo_persona: persona} : {})});
+    localStorage.setItem(anonymousKey(publicId), value);
+    if (persona) localStorage.setItem(anonymousKey(publicId, persona), value);
+  } catch { /* Current session remains usable without persistent history. */ }
+}
+export function clearAnonymous(publicId: string) { try {
+  const persona = readAnonymous(publicId).demo_persona;
+  localStorage.removeItem(anonymousKey(publicId));
+  if (persona) localStorage.removeItem(anonymousKey(publicId, persona));
+} catch { /* no storage */ } }
+
 export function embedSnippet(publicId: string, agentId: string, origin: string) {
   const src = new URL(appPath(publicId, true), origin).href;
   return `<iframe id="intent-agent" src="${src}" title="业务助手" width="100%" height="720" referrerpolicy="origin" style="border:0"></iframe>`;
 }
 export function handshakeSnippet(publicId: string, agentId: string, origin: string) {
-  return `// 宿主后端需实现 /internal/intent/embed-ticket；验证当前登录用户，
-// 使用受托身份调用平台 /api/v2/integrations/embed-tickets。不得向浏览器暴露管理令牌。
+  return `// 宿主后端需实现 /internal/intent/embed-ticket；验证当前访客，
+// 用用户绑定的 API Key 调用 /api/v2/integrations/embed-tickets。
+// Key 仅留在后端；visitor_id 与恢复关联也由后端维护，不信任浏览器传入的会话编号。
 const frame = document.getElementById('intent-agent');
 const agentOrigin = ${JSON.stringify(origin)};
 const agentId = ${JSON.stringify(agentId)};
@@ -65,14 +95,14 @@ window.addEventListener('message', async (event) => {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agent_id: agentId, host_origin: location.origin,
-        instance_nonce: nonce, runtime_session_id: data.runtime_session_id })
+        instance_nonce: nonce })
     });
     if (!response.ok) throw new Error('宿主身份换票失败');
-    const { ticket } = await response.json();
+    const { ticket, runtime_session_id } = await response.json();
     if (nonce !== data.instance_nonce) return;
     frame.contentWindow.postMessage({ type: 'AGENT_INIT', protocol_version: '1',
       agent_id: agentId, instance_nonce: nonce, ticket,
-      runtime_session_id: data.runtime_session_id }, agentOrigin);
+      runtime_session_id }, agentOrigin);
   }
   // AUTH_REQUIRED 后等待新的 AGENT_READY，按同样流程续期。
   // AGENT_RESIZE 可按宿主允许的高度范围处理。

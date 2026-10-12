@@ -38,7 +38,9 @@ def test_runtime_read_channels_project_business_steps_without_internal_trace(cli
     row = run.json()
     assert row["calls"] and all(set(call) == {"id", "status"} for call in row["calls"])
     assert row["bindings"] == []
-    assert row["steps"] and row["steps"][0]["name"] == seeded["functions"][0]["name"]
+    assert row["steps"] == []
+    detail = client.get(f"/api/v2/management/workspaces/ws-dev/runs/{rid}/trace", headers=admin)
+    assert detail.status_code == 200 and detail.json()["steps"][0]["name"] == seeded["functions"][0]["name"]
     assert set(row["timing"]) == {"total_ms", "user_wait_ms", "processing_ms"}
     legacy_results = [item["payload"] for item in events.json() if item["event_type"] == "RESULT"]
     assert legacy_results and isinstance(legacy_results[0]["data"], dict)
@@ -89,6 +91,62 @@ def test_historical_event_payload_is_allowlisted_even_if_raw_ledger_contains_ext
                     "trace_id": "call-private"})
     projected = event_view(error)
     assert projected["payload"] == {"message": "请求未完成，请查看运行状态", "code": "ERROR"}
+
+
+def test_final_answer_translates_only_reserved_synthesis_metadata():
+    from intent_platform.services import business_answer_text
+    text = "account_id=A001，账户余额为 12000。`deterministic_balance_totals` 为空。"
+    assert business_answer_text(text) == "account_id=A001，账户余额为 12000。`账户余额合计` 为空。"
+    assert business_answer_text("pre_deterministic_balance_totals_note；account_id；customer_id") == "pre_deterministic_balance_totals_note；account_id；customer_id"
+    event = Event(workspace_id="ws-dev", conversation_id="conv-demo", run_id="run-demo", revision=1,
+        sequence=3, event_type="RESULT", payload={"title": "答复", "data": text, "component": "text"})
+    assert "deterministic_balance_totals" not in event_view(event)["payload"]["data"]
+    assert event.payload["data"] == text  # Historical immutable facts are not rewritten.
+
+
+def test_new_and_historical_final_answers_share_poll_history_and_sse_projection(client, admin, seeded):
+    import asyncio
+    from intent_platform.auth import authenticate
+    from intent_platform.main import events as stream_events
+    from intent_platform.services import emit, final_payload
+    headers, agent = _runtime(client, admin, seeded)
+    cid = conversation(client, headers, agent["id"])
+    rid = message(client, headers, cid, seeded["functions"][0]["name"] + " record_id=demo-001")
+    drain()
+    original = "已完成查询，account_id=A001；deterministic_balance_totals 为空。"
+    with Session(engine) as db, db.begin():
+        set_identity(db, "dev-admin")
+        run = db.get(Run, rid)
+        old = emit(db, run, "RESULT", {"title": "答复", "component": "text", "data": original})
+        fresh = emit(db, run, "RESULT", final_payload(db, run, "部分结果：" + original, True))
+        db.flush()
+        old_id, first_sequence, last_sequence = old.id, old.sequence, fresh.sequence
+        assert "deterministic_balance_totals" not in fresh.payload["data"]
+        assert old.payload["data"] == original
+    responses = [client.get(f"/api/v2/runtime/runs/{rid}", headers=headers),
+                 client.get(f"/api/v2/runtime/conversations/{cid}/events", headers=headers, params={"after": first_sequence - 1}),
+                 client.get(f"/api/v2/runtime/conversations/{cid}/history", headers=headers)]
+    for response in responses:
+        assert response.status_code == 200, response.text
+        assert "deterministic_balance_totals" not in response.text
+    projected = responses[1].json()
+    assert all("account_id=A001" in event["payload"]["data"] for event in projected)
+    assert all("账户余额合计" in event["payload"]["data"] for event in projected)
+    with Session(engine) as db:
+        token = authenticate(headers["Authorization"], db)
+        response = stream_events(cid, first_sequence - 1, True, token, db)
+        assert db.get(Event, old_id).payload["data"] == original
+    async def read_final_chunks():
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+            if chunk.startswith(f"id: {last_sequence}\n"):
+                await response.body_iterator.aclose()
+                break
+        return "".join(chunks)
+    restored = asyncio.run(read_final_chunks())
+    assert "deterministic_balance_totals" not in restored
+    assert "account_id=A001" in restored and "账户余额合计" in restored
 
 
 def test_revoked_function_blocks_run_projection(client, admin, seeded):
@@ -153,7 +211,8 @@ def test_demo_object_revocation_blocks_restored_run_events_history_stream_and_fi
         assert state is not None
         saved = deepcopy(state.state)
         changed = deepcopy(saved)
-        changed["_customer_permissions"]["dev-reader"] = []
+        from intent_platform.demo.engine import initial_state
+        changed.setdefault("_customer_permissions", initial_state()["_customer_permissions"])["dev-reader"] = []
         state.state = changed
     try:
         assert client.get(f"/api/v2/runtime/runs/{rid}", headers=runtime).status_code == 403

@@ -123,10 +123,10 @@ it("keeps colliding query/body names as separate positions and refuses an overwr
   fireEvent.change(screen.getAllByLabelText("接口字段名")[2], { target: { value: "payload" } }); expect(current.connector.http_mapping?.body).toEqual({ payload: "body_item" }); expect(current.connector.http_mapping?.query).toEqual({ item: "query_item" });
   expect(screen.getByLabelText("业务失败 HTTP 404")).not.toBeChecked();
   fireEvent.click(screen.getByLabelText("业务失败 HTTP 404"));
-  fireEvent.click(screen.getByLabelText("必须发送 JSON body（即使空对象）"));
+  fireEvent.click(screen.getByLabelText("即使没有参数也发送请求内容"));
   expect(current.connector).toMatchObject({ http_failure_statuses: [404], http_body_required: true });
   expect(current.connector.http_mapping?.body).toEqual({ payload: "body_item" });
-  expect(screen.getByRole("option", { name: "v1 · 原有连接器" })).toBeDisabled();
+  expect(screen.queryByRole("option", { name: "v1 · 原有连接器" })).toBeNull();
 });
 it("keeps the edited mapping row in place when a wire name changes", () => {
   const d = { ...definition, connector: { ...definition.connector, http_mapping: { ...definition.connector.http_mapping!, query: { first: "query_item", second: "body_item" } } } };
@@ -147,7 +147,7 @@ it("preserves all unchanged citations on PUT and binds the edited source list to
   const review: SourceReview = { ...readyReview, api_source: null, citations: [first, second] };
   vi.spyOn(api, "get").mockResolvedValue(review); const put = vi.spyOn(api, "put").mockResolvedValue({ ...review, revision: 4, citations: [first], ready: false }); const changed = vi.fn().mockResolvedValue(undefined); const onReview = vi.fn();
   render(<SourceReviewPanel api={api} workspace="ws" item={capability} writable dirty={false} busy={false} onReview={onReview} onChanged={changed} />);
-  await screen.findByRole("button", { name: "移除引用 2" }); fireEvent.click(screen.getByRole("button", { name: "移除引用 2" })); expect(onReview).toHaveBeenLastCalledWith(null); fireEvent.click(screen.getByRole("button", { name: "保存完整引用列表" }));
+  await screen.findByRole("button", { name: "移除引用 2" }); fireEvent.click(screen.getByRole("button", { name: "移除引用 2" })); await waitFor(() => expect(onReview).toHaveBeenLastCalledWith(null)); fireEvent.click(screen.getByRole("button", { name: "保存完整引用列表" }));
   await waitFor(() => expect(put).toHaveBeenCalled()); expect(put.mock.calls[0]).toEqual(["/api/v2/management/workspaces/ws/functions/f/sources", { revision: 3, citations: [{ field_path: "description", document_id: "doc", revision: 1, section_id: "section", quote: "source", proposed_value: "A" }] }]); expect(changed.mock.calls[0][0]).toMatchObject({ revision: 4, status: "draft", definition });
 });
 it("retains a reason after stale confirmation and never substitutes candidate values into the draft", async () => {
@@ -168,10 +168,12 @@ it("requires an exact quote in the pinned section before adding and saving an at
   await waitFor(() => expect(put).toHaveBeenCalledWith("/api/v2/management/workspaces/ws/functions/f/sources", { revision: 3, citations: [{ field_path: "description", document_id: "doc", revision: 2, section_id: "section", quote: "body source", proposed_value: "业务解释" }] }));
 });
 it("guards imported write probes and sends explicit success/failure parameters and revision before publish", async () => {
-  const api = new ApiClient("management"); vi.spyOn(api, "get").mockResolvedValue(readyReview); const post = vi.spyOn(api, "post").mockResolvedValue({ valid: true, revision: 3, errors: [], checks: {}, probe: { status: "SUCCEEDED" } });
-  render(<FunctionEditor api={api} workspace="ws" item={{ ...capability, definition: { ...definition, effect: "WRITE", requires_confirmation: true } }} writable onClose={vi.fn()} onSaved={async () => {}} />);
-  await screen.findByLabelText("预期失败样例参数（JSON）"); fireEvent.click(screen.getByLabelText(/调用真实测试接口/)); expect(screen.getByRole("button", { name: "验证当前草稿" })).toBeDisabled(); expect(screen.getByRole("button", { name: "发布功能版本" })).toBeDisabled();
-  fireEvent.change(screen.getByLabelText("契约测试参数（JSON）"), { target: { value: '{"case":"ok"}' } }); fireEvent.change(screen.getByLabelText("预期失败样例参数（JSON）"), { target: { value: '{"case":"failed"}' } }); fireEvent.click(screen.getByLabelText(/确认本次测试允许/)); fireEvent.click(screen.getByRole("button", { name: "验证当前草稿" }));
+  const api = new ApiClient("management"); vi.spyOn(api, "get").mockResolvedValue(readyReview); const post = vi.spyOn(api, "post").mockResolvedValue({ valid: true, revision: 3, errors: [], checks: {}, probe: { status: "SUCCEEDED" },execution_test:{passed:true,revision:3,status:"SUCCEEDED"},failure_execution_test:{passed:true,revision:3,status:"FAILED"} });
+  const authoring = {...definition,authoring_version:"function-v2" as const,effect:"WRITE" as const,requires_confirmation:true};
+  render(<FunctionEditor api={api} workspace="ws" item={{ ...capability, definition: authoring }} writable onClose={vi.fn()} onSaved={async () => {}} />);
+  fireEvent.click(screen.getByRole("button", {name:/3 验证与发布/}));
+  await screen.findByLabelText("预期失败样例参数（JSON）"); fireEvent.click(screen.getByRole("button", {name:"执行测试"}));await screen.findByText(/请明确确认本次测试的写入效果/);expect(post).not.toHaveBeenCalled();expect(screen.getByRole("button", {name:"发布功能版本"})).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("契约测试参数（JSON）"), { target: { value: '{"case":"ok"}' } }); fireEvent.change(screen.getByLabelText("预期失败样例参数（JSON）"), { target: { value: '{"case":"failed"}' } }); fireEvent.click(screen.getByLabelText(/允许在测试环境办理写入/)); fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v2/management/workspaces/ws/functions/f/validate", { revision: 3, arguments: { case: "ok" }, failure_arguments: { case: "failed" }, probe: true, allow_effects: true })); await waitFor(() => expect(screen.getByRole("button", { name: "发布功能版本" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "发布功能版本" })); await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v2/management/workspaces/ws/functions/f/publish", { revision: 3 }));
 });
@@ -183,12 +185,13 @@ it("allows only one draft kind at a time without locking both saves or losing pe
   let rejectConfirm!: (value: unknown) => void;
   const pending = new Promise((_, reject) => { rejectConfirm = reject; }); vi.spyOn(api, "post").mockReturnValue(pending);
   render(<FunctionEditor api={api} workspace="ws" item={capability} writable onClose={vi.fn()} onSaved={async () => {}} />);
+  fireEvent.click(screen.getByRole("button", {name:/3 验证与发布/}));
   await screen.findByRole("button", { name: "移除引用 1" });
   fireEvent.change(screen.getByLabelText("功能名称"), { target: { value: "定义未保存" } });
-  expect(screen.getByRole("button", { name: "添加文档引用" })).toBeDisabled(); expect(screen.getByRole("button", { name: "保存新草稿" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "添加文档引用" })).toBeDisabled(); expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled();
   fireEvent.change(screen.getByLabelText("功能名称"), { target: { value: definition.name } });
   fireEvent.click(screen.getByRole("button", { name: "移除引用 1" }));
-  expect(screen.getByLabelText("功能名称")).toBeDisabled(); expect(screen.getByRole("button", { name: "保存新草稿" })).toBeDisabled(); expect(screen.getByRole("button", { name: "保存完整引用列表" })).toBeEnabled();
+  expect(screen.getByLabelText("功能名称")).toBeDisabled(); expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled(); expect(screen.getByRole("button", { name: "保存完整引用列表" })).toBeEnabled();
   fireEvent.click(screen.getByRole("button", { name: "还原引用修改" })); expect(screen.getByLabelText("功能名称")).toBeEnabled(); expect(screen.getByRole("button", { name: "移除引用 1" })).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("确认理由：description"), { target: { value: "核对现有说明" } }); fireEvent.click(screen.getByRole("button", { name: "确认当前值：description" }));
   expect(screen.getByLabelText("功能名称")).toBeDisabled();

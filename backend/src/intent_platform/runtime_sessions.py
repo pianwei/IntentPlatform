@@ -8,8 +8,10 @@ from .policies import permitted, effective_channels, dependency_error
 
 def application(db, public_id):
     a = db.scalar(select(Agent).where(Agent.public_id == public_id))
-    if not a or not a.current_release_id:
+    if not a or not a.current_release_id or (a.runtime_ui or {}).get("authoring_test"):
         raise HTTPException(404, "Application unavailable")
+    from .workspace_lifecycle import require_workspace
+    require_workspace(db, a.workspace_id)
     return a
 
 
@@ -20,6 +22,8 @@ def check_session_binding(db, session_id, parent, agent, channel, origin=None, l
     existing = db.scalar(q)
     if not existing or existing.revoked or (existing.user_id, existing.agent_id, existing.workspace_id, existing.channel, existing.host_origin) != (parent.user_id, agent.id, agent.workspace_id, channel, origin):
         raise HTTPException(403, "Runtime session cannot be inherited or resumed")
+    from .workspace_lifecycle import require_workspace
+    require_workspace(db, agent.workspace_id, epoch=existing.workspace_epoch)
     from .trust import token_integration
     try:
         if existing.integration_id != token_integration(parent): raise ValueError("Integration differs")
@@ -29,6 +33,18 @@ def check_session_binding(db, session_id, parent, agent, channel, origin=None, l
 
 
 def scoped_session(db, parent, agent, channel, session_id=None, origin=None, nonce=None):
+    from .workspace_lifecycle import require_workspace
+    epoch = require_workspace(db, agent.workspace_id, lock=True)
+    if parent.source == "local":
+        from .local_identity import local_account, mint_runtime
+        local_account(db, parent)
+        if channel != "chat": raise HTTPException(403, "Use an integration key for embedding")
+        authorize(db, parent, agent.workspace_id)
+        release = db.get(Release, agent.current_release_id)
+        if not permitted(agent, parent.user_id) or not effective_channels(agent, release)["chat"]: raise HTTPException(403, "Application unavailable")
+        runtime = check_session_binding(db, session_id, parent, agent, channel, origin, lock=True) if session_id else None
+        if runtime and runtime.auth_method != "password": raise HTTPException(403, "Identity source cannot inherit this session")
+        return mint_runtime(db, parent.user_id, agent, "password", runtime=runtime, parent=parent)[0]
     # Logout takes this same parent lock. No child can be committed after logout's scan.
     parent = db.scalar(select(AuthToken).where(AuthToken.id == parent.id).with_for_update().execution_options(populate_existing=True))
     if parent.scope != "management" or not token_valid(db, parent):
@@ -48,7 +64,7 @@ def scoped_session(db, parent, agent, channel, session_id=None, origin=None, non
         if legacy:
             session_id = legacy.id
     runtime = check_session_binding(db, session_id, parent, agent, channel, origin, lock=True) if session_id else RuntimeSession(
-        workspace_id=agent.workspace_id, agent_id=agent.id, user_id=parent.user_id, channel=channel, host_origin=origin)
+        workspace_id=agent.workspace_id, workspace_epoch=epoch, agent_id=agent.id, user_id=parent.user_id, channel=channel, host_origin=origin)
     from .trust import token_integration, integration_allowed
     if not integration_allowed(agent, release, parent, channel, origin, runtime.integration_id if session_id else None,
                                {"identity_policy": runtime.identity_policy} if session_id else None):
@@ -71,5 +87,9 @@ def scoped_session(db, parent, agent, channel, session_id=None, origin=None, non
 
 def token_view(token):
     from .config import settings
+    from sqlalchemy.orm import object_session
+    db = object_session(token) if hasattr(token, "_sa_instance_state") else None
+    runtime = db.get(RuntimeSession, token.runtime_session_id) if db and token.runtime_session_id else None
     return {"access_token": token.id, "token_type": "bearer", "user_id": token.user_id, "agent_id": token.agent_id,
+            "demo_persona": runtime.demo_persona if runtime else None,
             "runtime_session_id": token.runtime_session_id, "expires_at": token.expires_at, "fixture_mode": settings().fixture_mode}

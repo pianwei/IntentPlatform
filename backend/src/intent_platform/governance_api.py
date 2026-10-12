@@ -46,6 +46,10 @@ def update_member(ws: str, user_id: str, body: MemberBody, token=Depends(authent
     lock_workspace(db, ws)
     row = db.scalar(select(Membership).where(Membership.workspace_id == ws, Membership.user_id == user_id).with_for_update())
     if body.revision != (row.revision if row else 0): raise HTTPException(409, "Member revision changed")
+    from .workspace_admin import can_allocate
+    previously_admin = bool(row and row.active and "admin" in member_authority(row)[0])
+    if body.active and "admin" in body.roles and not previously_admin and not can_allocate(token):
+        raise HTTPException(403, "Only platform administrators may assign workspace administrators")
     grant = member_ceiling(ws, user_id, row)
     if not grant["active"] or set(body.roles) - set(grant["roles"]): raise HTTPException(403, "Requested authority exceeds the trusted member ceiling")
     if row is None:
@@ -93,16 +97,15 @@ def attempts(db, run):
 
 @router.get(PREFIX + "/runs/{run_id}/attempts", response_model=list[AttemptOut])
 def management_attempts(ws: str, run_id: str, token=Depends(authenticate), db: Session = Depends(session)):
-    manager(db, token, ws, "admin")
+    manager(db, token, ws, "admin", archived_history=True)
     return [attempt_view(row) for row in db.scalars(select(ProcessingAttempt).where(ProcessingAttempt.workspace_id == ws, ProcessingAttempt.run_id == run_id).order_by(ProcessingAttempt.started_at, ProcessingAttempt.id))]
 
 
 @router.get("/api/v2/runtime/runs/{run_id}/attempts", response_model=list[RuntimeAttemptSummary])
 def runtime_attempts(run_id: str, token=Depends(authenticate), db: Session = Depends(session)):
     if token.scope != "runtime": raise HTTPException(403, "Scoped runtime session required")
-    owned_run(db, run_id, token)
-    labels = {"routing": "理解请求", "execution": "执行功能", "reconciliation": "核对结果"}
-    rows = db.scalars(select(ProcessingAttempt).where(ProcessingAttempt.run_id == run_id).order_by(ProcessingAttempt.started_at))
-    return [{"stage": labels.get(row.kind, "处理请求"), "status": row.status,
-             "duration_ms": round(max(0.0, (row.finished_at - row.started_at).total_seconds() * 1000), 2)
-             if row.finished_at else None} for row in rows]
+    from .services import _runtime_timing, authorize_run_capabilities
+    run = owned_run(db, run_id, token)
+    authorize_run_capabilities(db, run)
+    return [{"stage": "处理请求", "status": run.status,
+             "duration_ms": _runtime_timing(db, run)["processing_ms"]}]

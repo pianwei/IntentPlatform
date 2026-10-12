@@ -179,7 +179,7 @@ _PACKAGES = [
 ]
 
 
-def function_packages(domain_ref=None):
+def function_packages(domain_ref=None, *, three_layer=False, include_extension=False):
     """Return 20 fresh packages with stable operation keys and full Definitions.
 
     Pass an existing published ``domain_ref`` to compile with finite-json-v2.
@@ -187,7 +187,10 @@ def function_packages(domain_ref=None):
     remain explicit in either case. No resolver is claimed for synthetic IDs.
     """
     packages = []
-    for key, title, entity, result, action, inputs, required, outputs, sample, aliases, purpose in _PACKAGES:
+    extension = [("demo.account.currency", "查询账户币种", "Account", "Account", "READ",
+                  {"account_id": _S(20)}, ["account_id"], {"account_id": _S(20), "currency": _S(8)},
+                  {"account_id": "A001"}, ["账户是什么币种", "账户币种查询"], "读取模拟账户的记账币种；用于第21项自助接入演示。")]
+    for key, title, entity, result, action, inputs, required, outputs, sample, aliases, purpose in [*_PACKAGES, *(extension if include_extension else [])]:
         effect = "WRITE" if action in {"CREATE", "FREEZE"} else "READ_ONLY"
         utterances = [title, *aliases[:2], "请帮我" + title, "我想了解" + title]
         definition = {
@@ -208,6 +211,27 @@ def function_packages(domain_ref=None):
             "compiler_version": "finite-json-v2" if domain_ref else "finite-json-v1",
             "domain_refs": [domain_ref] if domain_ref else [],
         }
+        if three_layer and domain_ref:
+            id_types = {"customer_id": "Customer", "account_id": "Account", "transaction_id": "Transaction",
+                        "loan_id": "Loan", "product_id": "Product", "ticket_id": "Ticket"}
+            roles = {"target": entity}
+            bindings = {}
+            for field, entity_name in id_types.items():
+                if field in inputs:
+                    role = "target" if entity_name == entity else entity_name.lower()
+                    roles[role] = entity_name
+                    bindings[field] = {"role": role, "resolver_ref": "demo.entity." + entity_name + "@1"}
+            definition["participant_roles"] = [{"role": role, "type": "demo:" + typ, "required": True, "min_count": 1, "max_count": 1} for role, typ in roles.items()]
+            definition["argument_bindings"] = bindings
+            definition["trusted_preconditions"] = {"all": [{"fact": "identity.authenticated", "operator": "eq", "value": True},
+                *[{"fact": "entity." + binding["role"] + ".authorized", "operator": "eq", "value": True} for binding in bindings.values()]]}
+            definition["parameter_semantics"] = {field: {"kind": "date", "unit": None, "allow_relative": True} for field in inputs if field in {"start_date", "end_date"}}
+            collections = {"customers": ("Customer", "customer_id", "name"), "accounts": ("Account", "account_id", "account_id"),
+                           "transactions": ("Transaction", "transaction_id", "transaction_id"), "loans": ("Loan", "loan_id", "loan_id"),
+                           "products": ("Product", "product_id", "name"), "tickets": ("Ticket", "ticket_id", "ticket_id")}
+            definition["result_bindings"] = [{"name": field, "entity_type": "demo:" + typ, "collection_path": field,
+                "id_field": ident, "label_field": label, "resolver_ref": "demo.entity." + typ + "@1"}
+                for field, (typ, ident, label) in collections.items() if field in outputs]
         packages.append({"key": key, "intent": title, "entity_type": f"demo:{entity}",
                          "action_key": action, "sample_arguments": sample, "definition": definition,
                          "evaluation_utterances": utterances,

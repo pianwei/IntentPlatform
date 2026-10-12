@@ -1,0 +1,2 @@
+/* Existing configuration panels keep their styles below the approved shell. */
+@import "../../shared/styles.css" layer(legacy);

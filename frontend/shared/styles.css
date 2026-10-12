@@ -8,7 +8,7 @@
   color: #203049;
   background: #f5f7fa;
   font-synthesis: none;
-  font-size: 14px;
+  font-size: 100%;
   line-height: 1.6;
   --navy: #12233c;
   --text: #203049;
@@ -1582,7 +1582,7 @@ tbody tr:hover {
     height: 69px;
   }
   .chat-header h1 {
-    font-size: 14px;
+    font-size: 100%;
   }
   .thread-viewport,
   .composer-wrap {
@@ -1639,3 +1639,8 @@ tbody tr:hover {
     display: none;
   }
 }
+.safe-markdown .markdown-table-scroll { max-width:100%; overflow:auto; }
+.safe-markdown table { width:100%; border-collapse:collapse; font-size:inherit; }
+.safe-markdown th,.safe-markdown td { border:1px solid var(--border,#e6e8ee); padding:.55rem .7rem; text-align:left; vertical-align:top; }
+.safe-markdown th { background:var(--surface-muted,#f7f8fb); font-weight:600; }
+.safe-markdown blockquote { margin:.7rem 0; padding:.3rem .8rem; border-left:3px solid var(--border,#d6daf0); color:var(--text-muted,#667085); }

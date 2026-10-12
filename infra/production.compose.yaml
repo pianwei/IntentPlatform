@@ -5,6 +5,8 @@ name: intent-production
 x-runtime-environment: &runtime-environment
   INTENT_ENV: production
   INTENT_ALLOW_DEV_AUTH: "false"
+  INTENT_IDENTITY_MODE: local
+  INTENT_MODEL_SECRET_KEY: ${INTENT_MODEL_SECRET_KEY:?Set the server-side encryption key}
   INTENT_MODEL_MODE: openai
   INTENT_DATABASE_URL: ${INTENT_DATABASE_URL:?Set the restricted app database URL}
   INTENT_MIGRATION_DATABASE_URL: ${INTENT_MIGRATION_DATABASE_URL:?Set the separate owner database URL}
@@ -12,15 +14,13 @@ x-runtime-environment: &runtime-environment
   INTENT_MODEL_NAME: ${INTENT_MODEL_NAME:?Set the approved model name}
   INTENT_MODEL_VERSION: ${INTENT_MODEL_VERSION:?Set the immutable model version}
   INTENT_MODEL_API_KEY: ${INTENT_MODEL_API_KEY:?Supply the model service key from the approved secret channel}
-  INTENT_IDENTITY_INTROSPECTION_URL: ${INTENT_IDENTITY_INTROSPECTION_URL:?Set the trusted identity endpoint}
-  INTENT_IDENTITY_SERVICE_KEY: ${INTENT_IDENTITY_SERVICE_KEY:?Supply the identity service key from the approved secret channel}
   INTENT_OBJECT_AUTHORIZATION_URL: ${INTENT_OBJECT_AUTHORIZATION_URL:?Set the object authorization endpoint}
   INTENT_OBJECT_AUTHORIZATION_KEY: ${INTENT_OBJECT_AUTHORIZATION_KEY:?Supply the object authorization key from the approved secret channel}
   # These are outbound target hosts. The TLS ingress must separately restrict inbound Host.
   INTENT_ALLOWED_HOSTS: ${INTENT_ALLOWED_HOSTS:?Set exact outbound target hosts}
   INTENT_CORS_ORIGINS: ${INTENT_CORS_ORIGINS:?Set exact HTTPS browser origins}
-  INTENT_INTEGRATIONS_JSON: ${INTENT_INTEGRATIONS_JSON:?Set the approved identity integration catalog}
-  INTENT_MEMBERSHIP_GRANTS_JSON: ${INTENT_MEMBERSHIP_GRANTS_JSON:?Set the approved member ceiling}
+  INTENT_IDENTITY_DIRECTORY_JSON: ${INTENT_IDENTITY_DIRECTORY_JSON:-}
+  INTENT_PLATFORM_ADMINS_JSON: ${INTENT_PLATFORM_ADMINS_JSON:?Set controlled platform administrator account IDs}
   INTENT_CONNECTOR_TARGETS_JSON: ${INTENT_CONNECTOR_TARGETS_JSON:?Set approved connector targets or an explicit empty object}
   INTENT_CREDENTIALS_JSON: ${INTENT_CREDENTIALS_JSON:?Set approved credential references or an explicit empty object}
   INTENT_RESOLVERS_JSON: ${INTENT_RESOLVERS_JSON:?Set approved resolvers or an explicit empty object}

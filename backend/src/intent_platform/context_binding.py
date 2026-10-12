@@ -6,6 +6,7 @@ from .policies import permitted
 from .ports import at
 from .db import uid
 from .resolvers import resolve
+from .synthetic_runtime import resolver_kwargs
 
 
 class BindingDenied(ValueError):
@@ -44,7 +45,7 @@ def authorized_history(db, run, reference, expected, resolver_ref, profile, *, m
     if len(rows) > max_checks:
         raise BindingDenied("Reference an explicit row in collections exceeding the finite authorization budget")
     for row in rows:
-        matches = resolve(resolver_ref, profile, run.workspace_id, run.user_id, row["label"], selected_id=row["id"])
+        matches = resolve(resolver_ref, profile, run.workspace_id, run.user_id, row["label"], selected_id=row["id"], **resolver_kwargs(db, run, profile))
         if matches:
             result.append({**row, "label": matches[0]["label"]})
     return result
@@ -88,16 +89,22 @@ def bind_arguments(db, run, request_index, request, capability, release):
     definition = capability["definition"]
     records = copy.deepcopy(run.bindings or {})
     facts = {"identity.authenticated": True}
+    roles = {r["role"]: r for r in definition.get("participant_roles", [])}
+    required_parameters = set(definition.get("input_schema", {}).get("required", []))
     for parameter, binding in definition.get("argument_bindings", {}).items():
         key = str(request_index) + ":" + parameter
         role = binding["role"]; resolver_ref = binding["resolver_ref"]
+        saved = records.get(key, {})
         participant = next((p for p in request["participants"] if p["role"] == role), None)
         if not participant:
+            role_spec = roles.get(role, {})
+            optional = role_spec.get("required") is False and role_spec.get("min_count") == 0 and parameter not in required_parameters
+            if optional and parameter not in request["arguments"] and not saved:
+                continue
             raise BindingDenied("Required participant is missing")
         profile = release.snapshot["resolver_profiles"][resolver_ref]
         if participant["type"] != profile["entity_type"]:
             raise BindingDenied("Claimed participant type does not match the trusted resolver")
-        saved = records.get(key, {})
         if parameter in request["arguments"] and ("value" not in saved or request["arguments"][parameter] != saved["value"]):
             raise BindingDenied("Business identifiers cannot originate from model or form arguments")
         reference = saved.get("history_ref") or participant.get("history_ref")
@@ -107,7 +114,7 @@ def bind_arguments(db, run, request_index, request, capability, release):
         if reference:
             choices = authorized_history(db, run, reference, profile["entity_type"], resolver_ref, profile)
         elif query:
-            choices = resolve(resolver_ref, profile, run.workspace_id, run.user_id, query, saved.get("selected_id"))
+            choices = resolve(resolver_ref, profile, run.workspace_id, run.user_id, query, saved.get("selected_id"), **resolver_kwargs(db, run, profile))
         else:
             record["state"] = "mention"
             records[key] = record; run.bindings = records
@@ -182,22 +189,49 @@ def authorize_question(db, run, question_id):
             if candidate.get("history_ref"):
                 rows = authorized_history(db, run, candidate["history_ref"], profile["entity_type"], reference, profile, max_checks=1)
             else:
-                rows = resolve(reference, profile, run.workspace_id, run.user_id, candidate["label"], candidate["id"])
+                rows = resolve(reference, profile, run.workspace_id, run.user_id, candidate["label"], candidate["id"], **resolver_kwargs(db, run, profile))
             if len(rows) != 1 or rows[0]["id"] != candidate["id"] or rows[0]["label"] != candidate["label"]:
                 raise BindingDenied("Question candidate access changed")
     cache.add(key)
 
 
-def revalidate_call_bindings(db, run, call, release):
-    for record in call.bindings.values():
+def revalidate_binding_evidence(db, run, bindings, arguments, release):
+    """Recheck existing evidence without pretending a read-only probe is a Call."""
+    facts = {"identity.authenticated": True}
+    for record in bindings.values():
         if not isinstance(record, dict) or "parameter" not in record:
             continue
         profile = release.snapshot.get("resolver_profiles", {}).get(record["resolver_ref"])
-        if not profile or call.arguments.get(record["parameter"]) != record["value"]:
+        if not profile or arguments.get(record["parameter"]) != record["value"]:
             raise BindingDenied("Persisted binding is unavailable")
         if record.get("history_ref"):
             rows = authorized_history(db, run, record["history_ref"], profile["entity_type"], record["resolver_ref"], profile)
             if len(rows) != 1 or rows[0]["id"] != record["value"]:
                 raise BindingDenied("Historical source authorization changed")
-        elif len(resolve(record["resolver_ref"], profile, run.workspace_id, run.user_id, record["query"], record["value"])) != 1:
+        elif len(resolve(record["resolver_ref"], profile, run.workspace_id, run.user_id, record["query"], record["value"], **resolver_kwargs(db, run, profile))) != 1:
             raise BindingDenied("Entity authorization changed before dispatch")
+        facts["entity." + record["role"] + ".authorized"] = True
+        if record.get("history_ref"):
+            facts["history." + record["role"] + ".authorized"] = True
+    return facts
+
+
+def revalidate_call_bindings(db, run, call, release):
+    # An optional filter is optional only while absent. If present at dispatch,
+    # it needs the same trusted resolver evidence as a required identifier.
+    roles = {r["role"]: r for r in call.definition.get("participant_roles", [])}
+    required = set(call.definition.get("input_schema", {}).get("required", []))
+    for parameter, binding in call.definition.get("argument_bindings", {}).items():
+        role = roles.get(binding["role"], {})
+        must_bind = parameter in call.arguments or parameter in required or role.get("min_count", 1) > 0
+        evidence = [record for record in call.bindings.values() if isinstance(record, dict) and record.get("parameter") == parameter]
+        if must_bind and (len(evidence) != 1 or evidence[0].get("role") != binding["role"] or
+                         evidence[0].get("resolver_ref") != binding["resolver_ref"]):
+            raise BindingDenied("Supplied business identifier has no unique trusted binding")
+    facts = revalidate_binding_evidence(db, run, call.bindings, call.arguments, release)
+    if release.snapshot.get("prompt_policy_version") == "three-layer-v1":
+        from .semantic_v2 import truth
+        from .ports import condition
+        if truth(call.definition.get("trusted_preconditions"), facts) is not True or any(
+                condition(c, call.arguments) is not True for c in call.definition.get("preconditions", [])):
+            raise BindingDenied("Execution preconditions changed before dispatch")

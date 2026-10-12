@@ -32,9 +32,11 @@ def main():
     for key in list(os.environ):
         if key.startswith("INTENT_"):
             del os.environ[key]
-    os.environ.update({"INTENT_ENV": "test", "INTENT_MODEL_MODE": "fixture", "INTENT_ALLOW_DEV_AUTH": "true",
+    os.environ.update({"INTENT_ENV": "test", "INTENT_IDENTITY_MODE": "legacy-test", "INTENT_MODEL_MODE": "fixture", "INTENT_ALLOW_DEV_AUTH": "true",
+                       "INTENT_ALLOW_PUBLIC_DEEPSEEK_MODEL_TEST": "false",
                        "INTENT_DATABASE_URL": app_url, "INTENT_MIGRATION_DATABASE_URL": owner_url,
                        "INTENT_PROCESS_FAULTS_ENABLED": "1", "INTENT_PROCESS_FAULT_REPORT_DIR": str(report_dir)})
+    os.environ["PYTHONPATH"] = os.pathsep.join([str(BACKEND / "src"), str(BACKEND / "tests")])
     from process_fault_harness import guard_environment, safe_text
     guard_environment()  # Must succeed before any migration or database connection.
     from sqlalchemy import create_engine, text, inspect

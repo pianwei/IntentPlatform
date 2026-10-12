@@ -13,6 +13,11 @@ def token_valid(db, token):
     if not token or token.revoked or token.expires_at <= now():
         return False
     from .trust import token_integration, integration_allowed, member_authority
+    if settings().identity_mode == "local":
+        from .local_identity import local_token_valid
+        if not local_token_valid(db, token): return False
+    elif token.source == "local":
+        return False
     try:
         ref = token_integration(token)
         if token.scope == "management" and token.source == "introspection":
@@ -33,7 +38,10 @@ def token_valid(db, token):
         runtime = db.get(RuntimeSession, token.runtime_session_id) if token.runtime_session_id else None
         if not a or not r or not runtime or runtime.revoked or runtime.user_id != token.user_id or runtime.agent_id != a.id or not permitted(a, token.user_id):
             return False
-        if not member_authority(db.get(Membership, (token.user_id, a.workspace_id)))[1]:
+        from .workspace_lifecycle import workspace_available
+        if not workspace_available(db, a.workspace_id, runtime.workspace_epoch):
+            return False
+        if token.auth_method != "anonymous" and not member_authority(db.get(Membership, (token.user_id, a.workspace_id)))[1]:
             return False
         if not runtime.integration_id or not integration_allowed(a, r, token, runtime.channel, runtime.host_origin, runtime.integration_id, {"identity_policy": runtime.identity_policy}):
             return False
@@ -56,9 +64,16 @@ def authenticate(authorization: str | None = Header(default=None), db: Session =
     return token
 
 
-def authorize(db, token, workspace_id, roles=None):
+def authorize(db, token, workspace_id, roles=None, *, archived_history=False):
     if not token_valid(db, token):
         raise HTTPException(401, "Session expired or revoked")
+    if token.source == "local" and token.auth_method == "anonymous":
+        from .local_identity import guest_allowed
+        if roles or token.scope != "runtime" or not guest_allowed(db, token.user_id, workspace_id, token.agent_id):
+            raise HTTPException(403, "Anonymous identity is confined to its public application")
+        from .workspace_lifecycle import require_workspace
+        require_workspace(db, workspace_id)
+        return None
     member = db.get(Membership, (token.user_id, workspace_id))
     from .trust import member_authority, identity_workspace_allowed
     effective_roles, active = member_authority(member)
@@ -69,11 +84,18 @@ def authorize(db, token, workspace_id, roles=None):
             raise HTTPException(403, "Runtime token cannot access management APIs")
         if "admin" not in effective_roles and not set(roles).intersection(effective_roles):
             raise HTTPException(403, "Insufficient workspace role")
+    if not (archived_history and token.scope == "management" and "admin" in effective_roles):
+        from .workspace_lifecycle import require_workspace
+        require_workspace(db, workspace_id)
     return member
 
 
-def manager(db, token, workspace_id, role="maintainer"):
-    return authorize(db, token, workspace_id, [role])
+def manager(db, token, workspace_id, role="maintainer", *, archived_history=False):
+    member = authorize(db, token, workspace_id, [role], archived_history=archived_history)
+    if not archived_history:
+        from .workspace_lifecycle import require_workspace
+        require_workspace(db, workspace_id, lock=True)
+    return member
 
 
 def issue_token(db, user_id, scope="management", agent_id=None, source="development", delegation=None, parent=None, runtime_session_id=None):
@@ -88,7 +110,7 @@ def workspaces(db, token):
     rows = db.execute(select(Workspace, Membership).join(Membership, Workspace.id == Membership.workspace_id)
                       .where(Membership.user_id == token.user_id, Membership.active.is_(True))).all()
     from .trust import member_authority, identity_workspace_allowed
-    return [{"id": ws.id, "name": ws.name, "roles": member_authority(member)[0]} for ws, member in rows if member_authority(member)[1] and identity_workspace_allowed(token, ws.id)]
+    return [{"id": ws.id, "name": ws.name, "roles": member_authority(member)[0]} for ws, member in rows if ws.status == "active" and member_authority(member)[1] and identity_workspace_allowed(token, ws.id)]
 
 
 def audit(db, user_id, workspace_id, action, resource_id, detail=None):
@@ -96,7 +118,7 @@ def audit(db, user_id, workspace_id, action, resource_id, detail=None):
 
 
 def bootstrap_identity(db, user_id):
-    if not settings().allow_dev_auth or settings().env == "production":
+    if settings().identity_mode != "legacy-test" or not settings().allow_dev_auth or settings().env == "production":
         raise HTTPException(404, "Not found")
     users = {"dev-admin": ("ws-dev", ["admin", "maintainer", "publisher", "user"]),
              "dev-reader": ("ws-dev", ["user"]), "dev-other": ("ws-other", ["admin", "maintainer", "publisher", "user"])}

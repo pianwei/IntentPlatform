@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 
 
 def _authorized(db, job):
+    from .workspace_lifecycle import workspace_available
+    if not workspace_available(db, job.workspace_id, job.workspace_epoch):
+        return False
     token = db.get(AuthToken, job.token_id)
     try:
         if not token or token.user_id != job.created_by:
@@ -134,6 +137,7 @@ def finish(work, prepared=None, error=None):
     """Commit the result and terminal state once, only for the current lease."""
     with Session(engine, expire_on_commit=False) as db, db.begin():
         set_identity(db, work["user_id"])
+        lock_workspace(db, work["workspace_id"])
         row = db.scalar(select(IngestJob).where(IngestJob.id == work["id"]).with_for_update())
         if not row or row.status != "RUNNING" or row.attempt_id != work["attempt_id"] or row.lease_until <= now():
             return False

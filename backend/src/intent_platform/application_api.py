@@ -53,7 +53,8 @@ def public_app(db, public_id):
     row = db.execute(text("SELECT * FROM intent_public_app(:id)"), {"id": public_id}).mappings().first()
     if not row or not any(row["channels"].values()):
         raise HTTPException(404, "Application unavailable")
-    return {**dict(row), "runtime_ui": normalized_ui(row["runtime_ui"])}
+    catalog = db.scalar(text("SELECT intent_public_synthetic_catalog(:id)"), {"id": public_id})
+    return {**dict(row), "runtime_ui": normalized_ui(row["runtime_ui"]), "synthetic_catalog": catalog}
 
 
 @router.get("/api/v2/runtime/apps/{public_id}", response_model=PublicAppOut)
@@ -100,11 +101,14 @@ def start_session(public_id: str, body: SessionBody = Body(default=SessionBody()
 
 
 @router.get("/api/v2/runtime/conversations", response_model=list[ConversationOut])
-def conversations(token=Depends(authenticate), db: Session = Depends(session)):
+def conversations(include_empty: bool = True, token=Depends(authenticate), db: Session = Depends(session)):
     if token.scope != "runtime" or not token.runtime_session_id:
         raise HTTPException(403, "A scoped runtime session is required")
-    rows = db.scalars(select(Conversation).where(Conversation.runtime_session_id == token.runtime_session_id,
-                     Conversation.user_id == token.user_id, Conversation.status == "active").order_by(Conversation.updated_at.desc())).all()
+    query = select(Conversation).where(Conversation.runtime_session_id == token.runtime_session_id,
+                     Conversation.user_id == token.user_id, Conversation.status == "active")
+    if not include_empty:
+        query = query.where(select(Run.id).where(Run.conversation_id == Conversation.id).exists())
+    rows = db.scalars(query.order_by(Conversation.updated_at.desc())).all()
     return [conversation_view(db, c) for c in rows]
 
 
@@ -187,4 +191,17 @@ def download_file(file_id: str, token=Depends(authenticate), db: Session = Depen
     if not capability or capability.disabled or not permitted(capability, token.user_id):
         raise HTTPException(403, "Originating capability is unavailable")
     authorize_fixture_result_access(db, call, token.user_id)
+    from .models import Run
+    from .services import authorize_run_capabilities, final_files
+    authorize_run_capabilities(db, db.get(Run, call.run_id))
+    from .models import ExecutionPlan
+    plan = db.scalar(select(ExecutionPlan).where(ExecutionPlan.run_id == call.run_id))
+    if plan and plan.snapshot.get("three_layer"):
+        from .models import Event
+        finals = list(db.scalars(select(Event).where(Event.run_id == call.run_id, Event.event_type == "RESULT", Event.payload["title"].as_string() == "答复")))
+        allowed = {item.get("id") for e in finals for item in e.payload.get("files", []) if isinstance(item, dict)}
+        if finals and all("files" not in e.payload for e in finals):
+            allowed = {item.get("id") for item in final_files(db, call.run_id)}
+        if f.id not in allowed:
+            raise HTTPException(403, "File is not part of the approved final result")
     return binary_response(f.data, f.media_type, f.filename)

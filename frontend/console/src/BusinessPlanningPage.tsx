@@ -91,7 +91,7 @@ export function BusinessPlanningPage({ api, workspace, writable, publishable, ad
     });
   }
   return <div className="planning-page">
-    {development && admin && <section className="panel planning-seed"><div><h2>三层意图 Demo</h2><p>安装关联一致的 20 项模拟功能、动作、5 个业务 Skill 和一个全量智能体。数据仅供工程预览，不计入真实功能接入。</p></div><button className="primary" disabled={busy} onClick={() => void act(async () => { const result = await api.post<{ chat_path: string }>("/api/v2/dev/demo/seed", {}); await reload(); await onSeeded(); return `模拟功能已就绪。聊天入口：${result.chat_path}`; })}>安装或核对演示数据</button></section>}
+    {development && admin && <section className="panel planning-seed"><div><h2>智驭业务助手</h2><p>安装 14 个业务场景及组合规则，使用关联一致的模拟数据。</p></div><button className="primary" disabled={busy} onClick={() => void act(async () => { const result = await api.post<{ chat_path: string }>(`${base}/synthetic/zhiyu/install`, {}); await reload(); await onSeeded(); return `智驭业务助手已就绪。聊天入口：${result.chat_path}`; })}>安装或核对智驭场景</button></section>}
     {error && <Notice kind="error">{error}</Notice>}{notice && <Notice kind="success">{notice}</Notice>}
     <div className="planning-columns">
       <section className="panel planning-editor"><header><div><h2>动力层 · 动作目录</h2><p>动作提供语义模板，执行仍由已发布功能承担。</p></div><button className="secondary" disabled={!writable || busy} onClick={() => chooseAction()}>新建动作</button></header>

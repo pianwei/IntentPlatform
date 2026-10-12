@@ -1,137 +1,58 @@
-import { useEffect, useState, type FormEvent } from "react";
-import { ApiClient, errorText, management } from "../../shared/api";
-import { Notice } from "../../shared/ui";
-import "./ModelSettingsPage.css";
-
-type ModelConfig = {
-  protocol: "openai-compatible";
-  endpoint: string;
-  model: string;
-  model_version: string;
-  thinking_mode: "default" | "disabled";
-  timeout_seconds: number;
-};
-type ModelVersion = {
-  id: string;
-  profile_id: string;
-  version: number;
-  config: ModelConfig;
-  has_api_key: boolean;
-  created_at: string;
-};
-export type ModelProfile = {
-  id: string;
-  workspace_id: string;
-  name: string;
-  revision: number;
-  latest_version: number;
-  disabled: boolean;
-  latest: ModelVersion | null;
-};
-type TestResult = { ok: boolean; profile_id: string; version: number; elapsed_ms: number };
-
-const blank: ModelConfig = {
-  protocol: "openai-compatible",
-  endpoint: "",
-  model: "",
-  model_version: "",
-  thinking_mode: "default",
-  timeout_seconds: 30,
-};
-
-export function ModelSettingsPage({ api, workspace, admin }: { api: ApiClient; workspace: string; admin: boolean }) {
-  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
-  const [selected, setSelected] = useState<string>("");
-  const [name, setName] = useState("");
-  const [config, setConfig] = useState<ModelConfig>(blank);
-  const [apiKey, setApiKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [versions, setVersions] = useState<ModelVersion[]>([]);
-  const active = profiles.find(item => item.id === selected);
-  const base = `${management(workspace)}/model-profiles`;
-
-  async function reload() {
-    const items = await api.get<ModelProfile[]>(base);
-    setProfiles(items);
-    return items;
-  }
-  useEffect(() => {
-    let live = true;
-    setProfiles([]); setSelected(""); setName(""); setConfig(blank); setApiKey(""); setVersions([]); setError(""); setNotice("");
-    api.get<ModelProfile[]>(base).then(items => { if (live) setProfiles(items); }).catch(e => { if (live) setError(errorText(e)); });
-    return () => { live = false; };
-  }, [api, base]);
-  useEffect(() => {
-    let live = true;
-    if (!selected) { setVersions([]); return; }
-    api.get<ModelVersion[]>(`${base}/${encodeURIComponent(selected)}/versions`)
-      .then(items => { if (live) setVersions(items); }).catch(e => { if (live) setError(errorText(e)); });
-    return () => { live = false; };
-  }, [api, base, selected]);
-
-  function choose(profile: ModelProfile | null) {
-    setSelected(profile?.id ?? "");
-    setName(profile?.name ?? "");
-    setConfig(profile?.latest?.config ?? blank);
-    setApiKey(""); setError(""); setNotice("");
-  }
-  function update(patch: Partial<ModelConfig>) { setConfig(current => ({ ...current, ...patch })); setNotice(""); }
-  async function save(e: FormEvent) {
-    e.preventDefault(); setBusy(true); setError(""); setNotice("");
-    try {
-      const result = active
-        ? await api.post<ModelProfile>(`${base}/${encodeURIComponent(active.id)}/versions`,
-            { revision: active.revision, config, ...(apiKey ? { api_key: apiKey } : {}) })
-        : await api.post<ModelProfile>(base, { name: name.trim(), config, api_key: apiKey });
-      setApiKey("");
-      const items = await reload();
-      choose(items.find(item => item.id === result.id) ?? result);
-      setNotice(`模型配置 v${result.latest_version} 已保存。智能体发布后，新会话才会使用所选版本。`);
-      setVersions(await api.get<ModelVersion[]>(`${base}/${encodeURIComponent(result.id)}/versions`));
-    } catch (cause) {
-      setError(errorText(cause) + "。当前输入已保留；如出现修订冲突，请刷新并核对后再保存。");
-    } finally { setBusy(false); }
-  }
-  async function test(version: number) {
-    if (!active) return;
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const result = await api.post<TestResult>(`${base}/${encodeURIComponent(active.id)}/versions/${version}/test`);
-      setNotice(result.ok ? `v${result.version} 连接与结构化输出测试通过，耗时 ${result.elapsed_ms} ms。` : "模型测试未通过。");
-    } catch (cause) { setError(errorText(cause)); }
-    finally { setBusy(false); }
-  }
-  async function disable() {
-    if (!active) return;
-    setBusy(true); setError(""); setNotice("");
-    try {
-      await api.post(`${base}/${encodeURIComponent(active.id)}/disable`, { revision: active.revision });
-      const items = await reload();
-      choose(items.find(item => item.id === active.id) ?? null);
-      setNotice("模型配置已停用，引用它的会话将明确提示依赖不可用。");
-    } catch (cause) { setError(errorText(cause)); }
-    finally { setBusy(false); }
-  }
-
-  if (!admin) return <Notice>模型配置和连接测试仅供当前空间管理员使用。</Notice>;
-  return <div className="model-settings">
-    <div className="table-toolbar"><p className="muted">模型凭据由服务端保管。默认只允许获准的内网服务；DeepSeek 官网联调仅在本地开发环境显式开启，且只用于 20 项模拟功能。请勿输入真实客户或业务数据。</p><button className="primary" onClick={() => choose(null)}>新建模型配置</button><button className="secondary" disabled={busy} onClick={() => void reload().catch(e => setError(errorText(e)))}>刷新</button></div>
-    {error && <Notice kind="error">{error}</Notice>}{notice && <Notice kind="success">{notice}</Notice>}
-    <div className="model-settings-layout"><section className="panel model-settings-list"><h2>已配置模型</h2>{!profiles.length && <p className="muted">当前空间尚无模型配置。</p>}{profiles.map(profile => <button key={profile.id} className={selected === profile.id ? "model-profile-choice selected" : "model-profile-choice"} onClick={() => choose(profile)}><strong>{profile.name}</strong><span>{profile.latest?.config.model ?? "未配置"} · {profile.latest?.config.model_version ?? "无版本"} · v{profile.latest_version}</span><small>{profile.disabled ? "已停用" : "可选"}</small></button>)}</section>
-      <section className="panel model-settings-form"><h2>{active ? `更新 ${active.name}` : "新建模型配置"}</h2>{active?.disabled && <Notice kind="error">此配置已停用。请创建新的模型配置。</Notice>}
-        <form onSubmit={e => void save(e)}><fieldset disabled={busy || !!active?.disabled}><div className="form-grid">
-          <label>配置名称<input required maxLength={160} value={name} disabled={!!active} onChange={e => setName(e.target.value)} /></label>
-          <label>协议<select value={config.protocol} onChange={e => update({ protocol: e.target.value as ModelConfig["protocol"] })}><option value="openai-compatible">OpenAI 兼容</option></select></label>
-          <label className="span-2">完整请求地址<input required type="url" maxLength={2000} placeholder="https://模型内网地址/v1/chat/completions" value={config.endpoint} onChange={e => update({ endpoint: e.target.value })} /></label>
-          <label>模型名<input required maxLength={160} value={config.model} onChange={e => update({ model: e.target.value })} /></label>
-          <label>模型版本<input required maxLength={160} value={config.model_version} onChange={e => update({ model_version: e.target.value })} /></label>
-          <label>思考模式<select value={config.thinking_mode} onChange={e => update({ thinking_mode: e.target.value as ModelConfig["thinking_mode"] })}><option value="default">服务默认</option><option value="disabled">关闭思考（DeepSeek）</option></select></label>
-          <label>超时（秒）<input required type="number" min="1" max="120" step="1" value={config.timeout_seconds} onChange={e => update({ timeout_seconds: Number(e.target.value) })} /></label>
-          <label>访问凭据<input type="password" autoComplete="new-password" required={!active} value={apiKey} onChange={e => setApiKey(e.target.value)} /><small>{active?.latest?.has_api_key ? "已配置；留空则沿用当前版本的服务端凭据" : "只在保存时提交，页面不读取已保存的凭据"}</small></label>
-        </div><button className="primary" disabled={!name.trim() || !config.endpoint || !config.model || !config.model_version || (!active && !apiKey)}>{active ? "保存为新版本" : "创建模型配置"}</button></fieldset></form>
-        {active && <><div className="model-versions"><h3>不可变版本</h3>{versions.map(version => <div key={version.id} className="model-version"><span>v{version.version} · {version.config.model} / {version.config.model_version}<small>{version.config.endpoint}</small></span><button className="secondary" disabled={busy || active.disabled} onClick={() => void test(version.version)}>测试连接及结构化输出</button></div>)}</div><button className="danger-link" disabled={busy || active.disabled} onClick={() => void disable()}>停用此配置</button></>}
-      </section></div>
-  </div>;
+import { useEffect, useRef, useState } from 'react';
+import { ApiClient, errorText, management } from '../../shared/api';
+import { Notice } from '../../shared/ui';
+import { Modal, Status } from './ModernUI';
+import { Plus, MoreHorizontal, Cpu, CheckCircle2 } from 'lucide-react';
+import { ActionMenu } from './ModernUI';
+export type ModelConfig={protocol:'openai-compatible';endpoint:string;model:string;model_version:string;thinking_mode:'default'|'disabled';timeout_seconds:number};
+type ModelVersion={id:string;profile_id:string;version:number;config:ModelConfig;has_api_key:boolean;created_at:string};
+export type ModelProfile={id:string;workspace_id:string;name:string;revision:number;latest_version:number;disabled:boolean;latest:ModelVersion|null};
+export type ModelTest={ok:boolean;profile_id:string;version:number;elapsed_ms:number};
+const blank:ModelConfig={protocol:'openai-compatible',endpoint:'',model:'',model_version:'',thinking_mode:'default',timeout_seconds:30};
+export function ModelResourcePage({api,workspace,id,onClose,onDirtyChange,onTest,onSaved}:{api:ApiClient;workspace:string;id:string;onClose:()=>void;onDirtyChange:(v:boolean)=>void;onTest:(r:ModelTest)=>void;onSaved:(value:ModelProfile)=>void}) {
+ const [item,setItem]=useState<ModelProfile|null|undefined>(id==='new'?null:undefined),[error,setError]=useState(''),[dirty,setDirty]=useState(false),[busy,setBusy]=useState(false);
+ useEffect(()=>onDirtyChange(dirty||busy),[dirty,busy,onDirtyChange]);
+ useEffect(()=>{let active=true;if(id!=='new')api.get<ModelProfile[]>(`${management(workspace)}/model-profiles`).then(items=>{if(active){const result=items.find(m=>m.id===id);if(result)setItem(result);else setError('此模型配置不可用。');}}).catch(e=>active&&setError(errorText(e)));return()=>{active=false;};},[api,workspace,id]);
+ return <section className="model-resource"><button className="back-link" disabled={busy} onClick={onClose}>返回模型配置</button><h1>{item?.name??'新建模型配置'}</h1>{error&&<Notice kind="error">{error}</Notice>}{item!==undefined&&<ModelEditor api={api} workspace={workspace} item={item} onDirtyChange={setDirty} onBusyChange={setBusy} onTest={onTest} onSaved={onSaved}/>}</section>;
+}
+export function ModelEditor({api,workspace,item=null,onSaved,onUse,onDirtyChange,onBusyChange,onTest}:{api:ApiClient;workspace:string;item?:ModelProfile|null;onSaved?:(model:ModelProfile)=>void;onUse?:(model:ModelProfile)=>void;onDirtyChange?:(value:boolean)=>void;onBusyChange?:(value:boolean)=>void;onTest?:(value:ModelTest)=>void}){
+ const [current,setCurrent]=useState(item),[name,setName]=useState(item?.name??''),[config,setConfig]=useState<ModelConfig>(item?.latest?.config??blank),[apiKey,setApiKey]=useState('');
+ const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[tested,setTested]=useState<ModelTest|null>(null),[versions,setVersions]=useState<ModelVersion[]>([]);
+ const alive=useRef(true),sending=useRef(false);useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
+ const dirty=!!apiKey||name!==(current?.name??'')||JSON.stringify(config)!==JSON.stringify(current?.latest?.config??blank);
+ useEffect(()=>{onDirtyChange?.(dirty);},[dirty,onDirtyChange]);useEffect(()=>{onBusyChange?.(busy);},[busy,onBusyChange]);
+ const base=`${management(workspace)}/model-profiles`;
+ useEffect(()=>{let live=true;if(current)api.get<ModelVersion[]>(`${base}/${current.id}/versions`).then(v=>live&&setVersions(v)).catch(e=>live&&setError(errorText(e)));return()=>{live=false;};},[api,base,current?.id,current?.latest_version]);
+ function update(patch:Partial<ModelConfig>){setConfig(v=>({...v,...patch}));setNotice('');setTested(null);}
+ async function testModel(model:ModelProfile,version=model.latest_version){const result=await api.post<ModelTest>(`${base}/${model.id}/versions/${version}/test`);if(alive.current){setTested(result);onTest?.(result);setNotice(result.ok?`v${result.version} 连接与结构化输出通过 · ${result.elapsed_ms} ms`:'模型测试未通过，配置已保留。');}return result;}
+ async function save(test=false){if(sending.current)return;sending.current=true;setBusy(true);setError('');setNotice('');try{
+  let saved=current;
+  if(!saved||dirty){saved=await api.post<ModelProfile>(current?`${base}/${current.id}/versions`:base,current?{revision:current.revision,config,...(apiKey?{api_key:apiKey}:{})}:{name:name.trim(),config,api_key:apiKey});if(!alive.current)return;setCurrent(saved);setConfig(saved.latest?.config??config);setName(saved.name);setApiKey('');setTested(null);onSaved?.(saved);}
+  if(!saved)return;
+  if(test)await testModel(saved);else setNotice(`v${saved.latest_version} 已保存，可用于智能体配置。`);
+ }catch(e){if(alive.current)setError(`${errorText(e)}。已保存的配置与当前输入保留，可重试测试。`);}finally{sending.current=false;if(alive.current)setBusy(false);}}
+ return <div className="model-editor"><form onSubmit={e=>{e.preventDefault();void save(true);}}><fieldset disabled={busy||!!current?.disabled}>
+ {error&&<Notice kind="error">{error}</Notice>}{notice&&<Notice kind={tested?.ok===false?'error':'success'}>{notice}</Notice>}
+ <div className="form-grid"><label className="field span-2">配置名称 <em>*</em><input aria-label="配置名称" required maxLength={160} disabled={!!current} value={name} placeholder="例如：业务问答模型" onChange={e=>setName(e.target.value)}/></label>
+ <label className="field span-2">完整请求地址 <em>*</em><input aria-label="完整请求地址" required type="url" value={config.endpoint} placeholder="https://模型地址/v1/chat/completions" onChange={e=>update({endpoint:e.target.value})}/><small>OpenAI 兼容协议，包含 chat/completions 路径。</small></label>
+ <label className="field">模型名 <em>*</em><input aria-label="模型名" required maxLength={160} value={config.model} placeholder="服务提供的模型名称" onChange={e=>update({model:e.target.value})}/></label><label className="field">模型版本 <em>*</em><input aria-label="模型版本" required maxLength={160} value={config.model_version} placeholder="明确的版本标识" onChange={e=>update({model_version:e.target.value})}/></label>
+ <label className="field span-2">访问凭据 {!current&&<em>*</em>}<input aria-label="访问凭据" type="password" required={!current} autoComplete="new-password" value={apiKey} onChange={e=>setApiKey(e.target.value)}/>{current&&<small>留空沿用服务端凭据。</small>}</label></div>
+ <details className="advanced"><summary>更多连接设置</summary><div className="field-row"><label className="field">思考模式<select value={config.thinking_mode} onChange={e=>update({thinking_mode:e.target.value as ModelConfig['thinking_mode']})}><option value="default">服务默认</option><option value="disabled">关闭思考（DeepSeek）</option></select></label><label className="field">超时（秒）<input type="number" min="1" max="120" required value={config.timeout_seconds} onChange={e=>update({timeout_seconds:Number(e.target.value)})}/></label></div></details>
+ <footer className="editor-footer"><span>{busy?'正在处理…':dirty?'尚未保存':current?`v${current.latest_version} 已保存`:'填写必要信息'}</span><div><button type="button" className="button" disabled={!name.trim()||!config.endpoint||!config.model||!config.model_version||(!current&&!apiKey)} onClick={e=>{if(e.currentTarget.form?.reportValidity())void save(false);}}>仅保存</button><button className="button primary" type="submit">{current&&!dirty?'测试连接及结构化输出':'保存并测试'}</button>{current&&onUse&&<button type="button" className="button" disabled={dirty} onClick={()=>onUse(current)}>使用此模型</button>}</div></footer>
+ </fieldset></form>{current&&<details className="model-history"><summary>版本记录 · {versions.length}</summary>{versions.map(v=><div className="model-version" key={v.id}><span>v{v.version} · {v.config.model_version}</span><button className="text-button" disabled={busy||current.disabled} onClick={async()=>{if(sending.current)return;sending.current=true;setBusy(true);setError('');try{await testModel(current,v.version);}catch(e){setError(errorText(e));}finally{sending.current=false;if(alive.current)setBusy(false);}}}>测试此版本</button></div>)}</details>}</div>;
+}
+export function ModelSettingsPage({api,workspace,admin,onCreated,onDirtyChange,onOpen,refreshKey=0,externalTests={}}:{api:ApiClient;workspace:string;admin:boolean;onCreated?:(model:ModelProfile)=>void;onDirtyChange?:(value:boolean)=>void;onOpen?:(item:ModelProfile|null)=>void;refreshKey?:number;externalTests?:Record<string,ModelTest>}){
+ const [profiles,setProfiles]=useState<ModelProfile[]>([]),[editing,setEditing]=useState<ModelProfile|null|undefined>(),[error,setError]=useState(''),[busy,setBusy]=useState(false),[dirty,setDirty]=useState(false),[discard,setDiscard]=useState(false),[disable,setDisable]=useState<ModelProfile|null>(null),[tests,setTests]=useState<Record<string,ModelTest>>({});
+ const mergedTests={...tests,...externalTests};
+ const base=`${management(workspace)}/model-profiles`;const generation=useRef(0);
+ async function reload(){const epoch=++generation.current;try{const items=await api.get<ModelProfile[]>(base);if(epoch===generation.current)setProfiles(items);}catch(e){if(epoch===generation.current)setError(errorText(e));}}
+ useEffect(()=>{setProfiles([]);void reload();return()=>{generation.current++;};},[api,base,refreshKey]);
+ useEffect(()=>{onDirtyChange?.(dirty);},[dirty,onDirtyChange]);
+ function open(item:ModelProfile|null){if(onOpen)onOpen(item);else setEditing(item);}
+ function close(){if(busy)return;if(dirty)setDiscard(true);else setEditing(undefined);}
+ if(!admin)return <Notice>模型配置仅供当前空间管理员使用。</Notice>;
+ return <div className="model-settings"><div className="list-toolbar"><span className="muted">{profiles.length} 个模型配置</span><div className="toolbar-right"><button className="button" onClick={()=>void reload()}>刷新</button><button className="button primary" onClick={()=>open(null)}><Plus size={16}/>新建模型配置</button></div></div>{error&&<Notice kind="error">{error}</Notice>}
+ <div className="model-cards">{profiles.map(p=><article className="model-card" key={p.id}><div className="model-card-icon"><Cpu size={22}/></div><div className="model-card-main"><h2><button onClick={()=>open(p)}>{p.name}</button></h2><p>{p.latest?.config.model} <span>·</span> {p.latest?.config.model_version}</p><div className="model-card-status"><Status value={p.disabled?'已停用':'有效'}/><span>v{p.latest_version}</span>{mergedTests[p.id]?.version===p.latest_version?<span><CheckCircle2 size={13}/>{mergedTests[p.id].ok?'测试通过':'测试未通过'} · {mergedTests[p.id].elapsed_ms} ms</span>:<span>未测试</span>}</div></div><button className="button" onClick={()=>open(p)}>配置</button><ActionMenu trigger={<button className="icon-button" aria-label={`操作 ${p.name}`}><MoreHorizontal size={18}/></button>} items={[{label:'查看版本与配置',onSelect:()=>open(p)},{label:'停用模型',danger:true,disabled:p.disabled,onSelect:()=>setDisable(p)}]}/></article>)}</div>{!profiles.length&&<div className="empty"><Cpu size={28}/><h3>连接你的第一个模型</h3><p>配置后可在智能体中选择使用。</p></div>}
+ {editing!==undefined&&<Modal title={editing?'模型配置':'新建模型配置'} onClose={close} busy={busy} wide><div className="modal-body">{discard?<><p>当前输入尚未保存。</p><div className="button-row"><button className="button" onClick={()=>setDiscard(false)}>继续编辑</button><button className="button primary" onClick={()=>{setDirty(false);setDiscard(false);setEditing(undefined);}}>放弃修改并关闭</button></div></>:null}<div hidden={discard}><ModelEditor api={api} workspace={workspace} item={editing} onSaved={()=>void reload()} onUse={onCreated} onDirtyChange={setDirty} onBusyChange={setBusy} onTest={r=>setTests(v=>({...v,[r.profile_id]:r}))}/></div></div></Modal>}
+ {disable&&<Modal title={`停用 ${disable.name}？`} busy={busy} onClose={()=>setDisable(null)}><div className="modal-body"><p>引用此配置的会话将无法继续调用模型，不会自动更换版本。</p></div><footer className="modal-footer"><button className="button" disabled={busy} onClick={()=>setDisable(null)}>取消</button><button className="button danger" disabled={busy} onClick={async()=>{setBusy(true);try{await api.post(`${base}/${disable.id}/disable`,{revision:disable.revision});setDisable(null);await reload();}catch(e){setError(errorText(e));}finally{setBusy(false);}}}>确认停用</button></footer></Modal>}</div>;
 }

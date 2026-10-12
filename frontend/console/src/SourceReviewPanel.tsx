@@ -23,6 +23,8 @@ export function SourceReviewPanel({ api, workspace, item, writable, dirty, busy:
   async function load() { const current = ++generation.current; setError(""); setReview(null); callback.current(null); try { const next = await api.get<SourceReview>(`${base}/source-review`); if (current !== generation.current) return; if (!Number.isInteger(next.revision) || !Array.isArray(next.issues) || !Array.isArray(next.citations)) throw new Error("来源审查响应结构不可用，请核对后端契约。"); setReview(next); setCitations(next.citations ?? []); callback.current(next); } catch (e) { if (current === generation.current) setError(errorText(e)); } }
   useEffect(() => { void load(); return () => { ++generation.current; }; }, [api, workspace, item.id, item.revision]);
   // Uncommitted citation changes must block function validation too.
+  // A null callback invalidates publication while keeping the parent's last
+  // review snapshot available to keep this editing panel mounted.
   useEffect(() => { callback.current(sourceDirty ? null : review); }, [sourceDirty, review]);
   useEffect(() => { onDirtyChange?.(sourceDirty); }, [sourceDirty, onDirtyChange]);
   useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);

@@ -23,9 +23,16 @@ from .output_contract import project_output, OutputContractError
 log = logging.getLogger(__name__)
 
 
-def current_token(db, run):
+def current_token(db, run, lock_authority=False):
     conv = db.get(Conversation, run.conversation_id)
     runtime = db.get(RuntimeSession, conv.runtime_session_id) if conv and conv.runtime_session_id else None
+    if lock_authority and runtime and runtime.integration_id == "local":
+        from .local_identity import locked_account, locked_key
+        if runtime.source_key_id:
+            locked_key(db, runtime.source_key_id)
+        elif runtime.auth_method == "password":
+            locked_account(db, run.user_id)
+        runtime = db.scalar(select(RuntimeSession).where(RuntimeSession.id == runtime.id).with_for_update().execution_options(populate_existing=True))
     token_id = runtime.current_token_id if runtime and runtime.current_token_id else conv.token_id if conv else None
     token = db.get(AuthToken, token_id) if token_id else None
     if runtime and runtime.revoked:
@@ -34,7 +41,7 @@ def current_token(db, run):
         return None
     member = db.get(Membership, (run.user_id, run.workspace_id))
     from .trust import member_authority, integration_allowed
-    if not member_authority(member)[1]:
+    if token.auth_method != "anonymous" and not member_authority(member)[1]:
         return None
     agent = db.get(Agent, conv.agent_id)
     if not agent or not permitted(agent, run.user_id):
@@ -63,12 +70,14 @@ def claim_run(user_id):
     return None
 
 
-def _claim_run(user_id, ws):
+def _claim_run(user_id, ws, only_run_id=None):
     with Session(engine, expire_on_commit=False) as db, db.begin():
         set_identity(db, user_id)
         lock_workspace(db, ws)
-        run = db.scalar(select(Run).where(Run.user_id == user_id, Run.workspace_id == ws, or_(Run.status == "RECEIVED", and_(Run.status == "ROUTING", Run.lease_until < now())))
-                        .order_by(Run.created_at).with_for_update(skip_locked=True).limit(1))
+        query = select(Run).where(Run.user_id == user_id, Run.workspace_id == ws, or_(Run.status == "RECEIVED", and_(Run.status == "ROUTING", Run.lease_until < now())))
+        if only_run_id:
+            query = query.where(Run.id == only_run_id)
+        run = db.scalar(query.order_by(Run.created_at).with_for_update(skip_locked=True).limit(1))
         if not run:
             return None
         token = current_token(db, run)
@@ -101,7 +110,7 @@ def _claim_run(user_id, ws):
 def prepare_run(work):
     started = time.monotonic(); work["metrics"] = {}
     try:
-        if work.get("prompt_policy_version") in {"planner-v1", "planner-v2", "planner-v3"}:
+        if work.get("prompt_policy_version") in {"planner-v1", "planner-v2", "planner-v3", "three-layer-v1"}:
             from .planning import prepare
             prepare(work)
         else:
@@ -174,6 +183,7 @@ def _prepare_run(work):
     validation_started = time.monotonic()
     with Session(engine) as db, db.begin(), measured_stage(work, "validation_ms", validation_started):
         set_identity(db, work["user_id"])
+        lock_workspace(db, work["workspace_id"])
         run = db.scalar(select(Run).where(Run.id == work["id"]).with_for_update())
         if not run or run.status != "ROUTING" or run.revision != work["revision"] or not attempt_live(db, work):
             return
@@ -316,12 +326,15 @@ def claim_call(user_id):
     return None
 
 
-def _claim_call(user_id, ws):
+def _claim_call(user_id, ws, only_run_id=None):
     with Session(engine, expire_on_commit=False) as db, db.begin():
         set_identity(db, user_id)
         lock_workspace(db, ws)
         eligible = select(Call.run_id).where(or_(Call.status == "PENDING", and_(Call.status == "EXECUTING", Call.lease_until < now())))
-        run = db.scalar(select(Run).where(Run.user_id == user_id, Run.workspace_id == ws, Run.id.in_(eligible)).with_for_update(skip_locked=True).limit(1))
+        query = select(Run).where(Run.user_id == user_id, Run.workspace_id == ws, Run.id.in_(eligible))
+        if only_run_id:
+            query = query.where(Run.id == only_run_id)
+        run = db.scalar(query.with_for_update(skip_locked=True).limit(1))
         if not run:
             return None
         call = db.scalar(select(Call).where(Call.run_id == run.id, or_(Call.status == "PENDING", and_(Call.status == "EXECUTING", Call.lease_until < now())))
@@ -365,6 +378,32 @@ def _claim_call(user_id, ws):
 
 def aggregate_status(db, run):
     from .models import ExecutionPlan
+    from .workspace_lifecycle import workspace_available
+    conv = db.get(Conversation, run.conversation_id)
+    runtime = db.get(RuntimeSession, conv.runtime_session_id) if conv.runtime_session_id else None
+    if not workspace_available(db, run.workspace_id, runtime.workspace_epoch if runtime else None):
+        # Archive fences future work but preserves already-dispatched facts.
+        from .models import PlanStep
+        from .planning import trace, persist_partial_result
+        plan = db.scalar(select(ExecutionPlan).where(ExecutionPlan.run_id == run.id))
+        if plan:
+            for step in db.scalars(select(PlanStep).where(PlanStep.plan_id == plan.id, PlanStep.status == "RUNNING")):
+                calls = {c.id: c for c in db.scalars(select(Call).where(Call.id.in_(step.call_ids)))}
+                if len(calls) != len(step.call_ids) or any(c.status in {"PENDING", "EXECUTING", "RECONCILING"} for c in calls.values()):
+                    continue
+                ordered = [calls[key] for key in step.call_ids]
+                step.status = "UNKNOWN" if any(c.status == "UNKNOWN" for c in ordered) else "SUCCEEDED" if all(c.status == "SUCCEEDED" for c in ordered) else "FAILED"
+                step.result = {"data": [(c.result or {}).get("data") for c in ordered] if step.spec.get("foreach") else (ordered[0].result or {}).get("data")}
+                step.finished_at = now()
+                trace(db, run, "execution", "step_finished", {"step": step.step_key, "status": step.status, "call_count": len(ordered)})
+            db.flush(); persist_partial_result(db, run)
+        states = list(db.scalars(select(Call.status).where(Call.run_id == run.id)))
+        run.status = ("EXECUTING" if any(s in {"EXECUTING", "RECONCILING"} for s in states) else
+                      "UNKNOWN" if "UNKNOWN" in states else "FAILED" if "FAILED" in states else
+                      "SUCCEEDED" if states and all(s == "SUCCEEDED" for s in states) and not plan else "CANCELLED")
+        if run.status != "EXECUTING": run.finished_at = now()
+        status_event(db, run, "Space archived; dispatched outcomes retained and remaining work stopped")
+        return
     if db.scalar(select(ExecutionPlan.id).where(ExecutionPlan.run_id == run.id)):
         from .planning import advance
         advance(db, run)
@@ -385,6 +424,7 @@ def aggregate_status(db, run):
 def finish_call(work, result):
     with Session(engine) as db, db.begin():
         set_identity(db, work["user_id"])
+        lock_workspace(db, work["workspace_id"])
         info = db.get(Call, work["id"])
         if not info:
             return
@@ -422,7 +462,8 @@ def finish_call(work, result):
             # Failure bodies can include upstream secrets and are never display data.
             emit(db, run, "ERROR", {"code": "BUSINESS_FAILED", "message": "Business operation failed; inspect the call trace", "trace_id": call.id})
         call.result = {"status": call.status, "data": data, "files": files, "operation_id": call.operation_id,
-                       "fixture_mode": bool(result.get("fixture_mode", False)), "result_unavailable": unavailable}
+                       "fixture_mode": bool(result.get("fixture_mode", False)), "result_unavailable": unavailable,
+                       "business_failure": result["status"] == "FAILED" and work.get("error_stage") != "connector"}
         if unavailable:
             call.result["error_code"] = "OUTPUT_CONTRACT_ERROR" if call.status == "FAILED" else "RESULT_UNAVAILABLE"
         # Results keep the original run/revision and never mutate a newer request's object.
@@ -460,6 +501,7 @@ def _process_call(work):
     # Recheck revocation after claim transaction, immediately before the outbound request.
     with Session(engine) as db, db.begin():
         set_identity(db, work["user_id"])
+        lock_workspace(db, work["workspace_id"])
         run = db.scalar(select(Run).where(Run.id == work["run_id"]).with_for_update())
         call = db.scalar(select(Call).where(Call.id == work["id"]).with_for_update())
         f = db.get(Function, call.capability_id)
@@ -485,11 +527,24 @@ def _process_call(work):
 
 
 def dispatch_permitted(db, run, call, function):
-    if not current_token(db, run) or not function or function.disabled or not permitted(function, run.user_id) or run.status != "EXECUTING" or run.revision != call.revision:
+    # Serialize the send boundary with credential revocation. Once dispatched_at
+    # commits, revocation cannot retract a business request already authorized.
+    if not current_token(db, run, lock_authority=True) or not function or function.disabled or not permitted(function, run.user_id) or run.status != "EXECUTING" or run.revision != call.revision:
         return False
     if call.definition["requires_confirmation"] and (not run.confirmed or not run.confirmation_expires_at or run.confirmation_expires_at <= now()):
         return False
     release = db.get(Release, db.get(Conversation, run.conversation_id).release_id)
+    from .models import ExecutionPlan
+    plan = db.scalar(select(ExecutionPlan).where(ExecutionPlan.run_id == run.id))
+    if plan and plan.snapshot.get("composite_function_id"):
+        parent = db.get(Function, plan.snapshot["composite_function_id"])
+        if not parent or parent.disabled or not permitted(parent, run.user_id):
+            return False
+    if plan:
+        for group in plan.snapshot.get("composite_groups", []):
+            parent = db.get(Function, group["function_id"])
+            if not parent or parent.disabled or not permitted(parent, run.user_id):
+                return False
     return dependency_error(release.snapshot, db) is None
 
 
@@ -508,6 +563,7 @@ def mark_dispatch(work):
             raise PermissionError("Trusted entity or historical authorization changed") from exc
     with Session(engine) as db, db.begin():
         set_identity(db, work["user_id"])
+        lock_workspace(db, work["workspace_id"])
         run = db.scalar(select(Run).where(Run.id == work["run_id"]).with_for_update())
         call = db.scalar(select(Call).where(Call.id == work["id"]).with_for_update())
         if call.status != "EXECUTING" or not attempt_live(db, work) or not dispatch_permitted(db, run, call, db.get(Function, call.capability_id)):
@@ -531,7 +587,7 @@ def _reconcile_one(user_id, ws):
         work = None
         for call in calls:
             connector = call.definition["connector"]
-            fixture_v2 = connector.get("kind") == "fixture" and connector.get("version") == "2"
+            fixture_v2 = connector.get("kind") == "fixture" and connector.get("version") in {"2", "3"}
             lookup = call.operation_id or (call.id if fixture_v2 or (connector.get("reconcile_by") == "idempotency_key" and connector.get("idempotency_header")) else None)
             if (not connector.get("status_endpoint") and not fixture_v2) or not lookup:
                 call.status = "UNKNOWN"; call.lease_until = now() + timedelta(seconds=30)
@@ -574,6 +630,7 @@ def authorize_reconciliation(work):
         revalidate_call_bindings(db, run, call, release)
     with Session(engine) as db:
         set_identity(db, work["user_id"])
+        lock_workspace(db, work["workspace_id"])
         run = db.get(Run, work["run_id"]); call = db.get(Call, work["id"])
         f = db.get(Function, call.capability_id)
         release = db.get(Release, db.get(Conversation, run.conversation_id).release_id)
@@ -584,6 +641,8 @@ def authorize_reconciliation(work):
 def tick():
     with Session(engine) as db:
         users = list(db.scalars(select(Membership.user_id).where(Membership.active.is_(True)).distinct()))
+        from .identity_models import AnonymousPrincipal
+        users.extend(db.scalars(select(AnonymousPrincipal.user_id).where(AnonymousPrincipal.revoked.is_(False), AnonymousPrincipal.expires_at > now())))
     did_work = False
     for user in users:
         work = claim_run(user)

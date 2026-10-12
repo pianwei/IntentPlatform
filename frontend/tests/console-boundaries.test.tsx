@@ -27,7 +27,7 @@ const capability = (id: string): Capability => ({
   is_fixture: false,
   definition: {
     name: id,
-    description: "",
+    description: "合成测试说明",
     object_type: "Object",
     action: "READ",
     result_type: "Detail",
@@ -63,15 +63,16 @@ describe("management consistency boundaries", () => {
     });
     vi.stubGlobal("fetch", fetch);
     render(<ConsoleWorkspace api={new ApiClient("management")} identity={{ access_token: "test", user_id: "user", fixture_mode: false }} onLogout={async () => {}} />);
-    await screen.findByText("功能 f"); fireEvent.click(within(screen.getByText("功能 f").closest("tr")!).getByRole("button", { name: "管理映射" }));
-    fireEvent.change(screen.getByLabelText("业务描述"), { target: { value: "保存 F 的修改" } }); fireEvent.click(screen.getByRole("button", { name: "保存新草稿" }));
+    fireEvent.click(screen.getByRole("button", { name: "功能库" }));
+    await screen.findByText("功能 f"); fireEvent.click(within(screen.getByText("功能 f").closest("tr")!).getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByLabelText("业务描述"), { target: { value: "保存 F 的修改" } }); fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
     await waitFor(() => expect(fetch.mock.calls.some(([path, init]) => path.endsWith("/functions/f/draft") && init?.method === "PATCH")).toBe(true));
-    fireEvent.click(screen.getByRole("button", { name: "关闭功能编辑" })); fireEvent.click(within(screen.getByText("功能 g").closest("tr")!).getByRole("button", { name: "管理映射" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭功能编辑" })); fireEvent.click(screen.getByRole("button", { name: "放弃修改并离开" })); fireEvent.click(within(screen.getByText("功能 g").closest("tr")!).getByRole("button", { name: "编辑" }));
     fireEvent.change(screen.getByLabelText("功能名称"), { target: { value: "G 未保存的修改" } });
     await act(async () => { resolveSave(respond({ ...f, revision: 2 })); await pending; });
     expect(screen.getByLabelText("功能名称")).toHaveValue("G 未保存的修改");
   });
-  it("does not reopen a created function from the prior workspace after a delayed save", async () => {
+  it("blocks closing during creation and permits switching workspace after the saved result", async () => {
     let resolveCreate!: (value: Response) => void;
     const pending = new Promise<Response>(resolve => { resolveCreate = resolve; });
     const fetch = vi.fn((path: string) => {
@@ -82,19 +83,23 @@ describe("management consistency boundaries", () => {
     });
     vi.stubGlobal("fetch", fetch);
     render(<ConsoleWorkspace api={new ApiClient("management")} identity={{ access_token: "test", user_id: "user", fixture_mode: false }} onLogout={async () => {}} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "接入新功能" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "接入新功能" }));
+    fireEvent.click(screen.getByRole("button", { name: "功能库" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "新建功能" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "新建功能" }));
     fireEvent.change(screen.getByLabelText("功能名称"), { target: { value: "新功能" } });
     fireEvent.change(screen.getByLabelText("业务描述"), { target: { value: "合成测试" } });
     fireEvent.change(screen.getByLabelText("业务对象"), { target: { value: "Object" } });
-    fireEvent.change(screen.getByLabelText("结果类型"), { target: { value: "Detail" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建功能草稿" }));
+    expect(screen.queryByLabelText("结果类型")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
     await waitFor(() => expect(fetch.mock.calls.some(([path]) => path.endsWith("/a/functions/import"))).toBe(true));
-    fireEvent.change(screen.getByLabelText("切换工作空间"), { target: { value: "b" } });
+    expect(screen.getByRole("button", { name: "关闭编辑" })).toBeDisabled();
+    await act(async () => { resolveCreate(respond({...capability("created"),workspace_id:"a",status:"draft",latest_version:null})); await pending; });
+    await waitFor(()=>expect(screen.getByRole("button",{name:"关闭编辑"})).toBeEnabled());
+    fireEvent.click(screen.getByRole("button",{name:"关闭编辑"}));
+    fireEvent.click(screen.getByRole("button",{name:"切换工作空间"}));fireEvent.click(await screen.findByRole("option",{name:"空间 B"}));
     await screen.findByText("功能 b");
-    await act(async () => { resolveCreate(respond(capability("a"))); await pending; });
-    expect(screen.queryByRole("dialog", { name: "管理功能" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("切换工作空间")).toHaveValue("b");
+    expect(screen.queryByRole("dialog", { name: "新建功能" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button",{name:"切换工作空间"})).toHaveTextContent("空间 B");
     expect(screen.getByText("功能 b")).toBeVisible();
   });
   it("ignores a late response from the prior workspace after the user switches scope", async () => {
@@ -127,14 +132,13 @@ describe("management consistency boundaries", () => {
         onLogout={async () => {}}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "功能库" }));
     await waitFor(() =>
       expect(
         fetch.mock.calls.some(([path]) => path.endsWith("/a/functions")),
       ).toBe(true),
     );
-    fireEvent.change(screen.getByLabelText("切换工作空间"), {
-      target: { value: "b" },
-    });
+    fireEvent.click(screen.getByRole("button",{name:"切换工作空间"}));fireEvent.click(await screen.findByRole("option",{name:"空间 B"}));
     await screen.findByText("功能 b");
     await act(async () => {
       resolveA(respond([capability("a")]));
@@ -142,10 +146,10 @@ describe("management consistency boundaries", () => {
     });
     expect(screen.queryByText("功能 a")).not.toBeInTheDocument();
     expect(screen.getByText("功能 b")).toBeVisible();
-    expect(screen.getByRole("button", { name: "接入新功能" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新建功能" })).toBeDisabled();
   });
   it("saves the observed agent revision so the server can reject stale drafts", async () => {
-    const fetch = vi.fn().mockImplementation(() => Promise.resolve(respond({ id: "agent-a" })));
+    const fetch = vi.fn().mockImplementation((_path:string, options:RequestInit) => Promise.resolve(respond(options.method === "PATCH" ? { id: "agent-a" } : [])));
     vi.stubGlobal("fetch", fetch);
     const onSaved = vi.fn().mockResolvedValue(undefined);
     render(
@@ -170,7 +174,7 @@ describe("management consistency boundaries", () => {
     fireEvent.change(screen.getByLabelText("智能体名称"), {
       target: { value: "新名" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存智能体草稿" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
     const patch = fetch.mock.calls.find(([, options]) => options.method === "PATCH")!;
     expect(patch[0]).toBe(

@@ -11,7 +11,7 @@ from .models import AuthToken, Release, Membership, RuntimeSession
 from .services import owned_conversation, visible_candidates
 from .policies import dependency_error
 from .trust import member_authority
-from .context_binding import history_context, authorized_history, revalidate_call_bindings
+from .context_binding import history_context, authorized_history, revalidate_binding_evidence
 from .evaluation_api import authorized_release
 from .evaluation_evidence import evaluation_profile
 from .resolvers import resolver_budget, resolve
@@ -53,7 +53,7 @@ def verify_binding_evidence(db, scratch, release, rows):
             if not isinstance(record, dict) or "parameter" not in record: continue
             profile = release.snapshot["resolver_profiles"][record["resolver_ref"]]
             if record.get("state") == "resolved":
-                revalidate_call_bindings(db, run, SimpleNamespace(bindings={"item": record}, arguments={record["parameter"]: record["value"]}), release)
+                revalidate_binding_evidence(db, run, {"item": record}, {record["parameter"]: record["value"]}, release)
             for candidate in record.get("options", {}).values():
                 if candidate.get("history_ref"):
                     current = authorized_history(db, run, candidate["history_ref"], profile["entity_type"], record["resolver_ref"], profile, max_checks=1)

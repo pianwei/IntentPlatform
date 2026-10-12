@@ -19,18 +19,20 @@ import {
 import {
   ArrowDown,
   ArrowUp,
-  CheckCircle2,
-  ChevronDown,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  X,
   LogOut,
   MessageSquare,
   Plus,
-  ShieldCheck,
   Sparkles,
   Square,
 } from "lucide-react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { ComposerDraft, CopyText, TurnContent, groupedMessages, historyGroups, type UserEntry } from "./ChatExperience";
 import { ApiClient, errorText } from "../../shared/api";
-import { Badge, Busy, Empty, Login, Notice } from "../../shared/ui";
-import { embeddingContext, trustedEmbedMessage } from "../../shared/embed";
+import { Empty, Notice } from "../../shared/ui";
 import { eventCursor, mergeEvents } from "../../shared/events";
 import type {
   Agent,
@@ -44,13 +46,16 @@ import type {
 } from "../../shared/types";
 import { Welcome, ApplicationIcon } from "../../shared/ApplicationView";
 import { readLocator, saveLocator } from "../../shared/application";
+import { TextSizeControl, textScale } from "../../shared/displayPreferences";
+import { useChatTextSize } from "./textPreferences";
 import "./Application.css";
-import { ResultCard, RuntimeProcessingSummary, statuses } from "./ResultCard";
 
 type EventActions = {
   run: Run | null;
+  summaries?: Record<string, Run>;
   busy: boolean;
   onDownload?: (file: RuntimeFile) => Promise<void>;
+  onCancel?: () => Promise<void>;
   onAction: (
     event: RuntimeEvent,
     kind: "answers" | "confirmations",
@@ -62,38 +67,22 @@ const Actions = createContext<EventActions>({
   busy: false,
   onAction: async () => {},
 });
-type UserEntry = {
-  id: string;
-  text: string;
-  runId?: string;
-  delivery: "pending" | "accepted" | "uncertain";
-};
 const processing = new Set(["RECEIVED", "ROUTING", "EXECUTING"]);
 function ChatMessage() {
   const message = useMessage();
-  const event = message.metadata.custom?.event as RuntimeEvent | undefined;
+  const custom = message.metadata.custom;
   const actions = useContext(Actions);
-  return (
-    <MessagePrimitive.Root className={`chat-message ${message.role}`}>
-      <div className="message-avatar">
-        {message.role === "user" ? "我" : <Sparkles size={17} />}
-      </div>
-      <div className="message-body">
-        {event ? (
-          <ResultCard event={event} {...actions} />
-        ) : (
-          <div className="message-text">
-            <MessagePrimitive.Content />
-            {message.metadata.custom?.uncertain === true && (
-              <small className="block delivery-warning">
-                发送结果尚未确认，请恢复会话记录后核实，避免重复办理。
-              </small>
-            )}
-          </div>
-        )}
-      </div>
-    </MessagePrimitive.Root>
-  );
+  const text = message.content.filter(part => part.type === "text").map(part => part.type === "text" ? part.text : "").join("\n");
+  return <MessagePrimitive.Root className={`chat-message ${message.role}`}>
+    {message.role !== "user" && <div className="message-avatar"><Sparkles size={16} /></div>}
+    <div className="message-body">
+      {message.role === "assistant" ? <TurnContent events={(custom?.turnEvents ?? []) as RuntimeEvent[]} runId={String(custom?.runId ?? "")} pending={custom?.pending === true} {...actions} /> : <>
+        <div className="message-text"><MessagePrimitive.Content />
+          {custom?.uncertain === true && <small className="block delivery-warning">发送结果尚未确认，请恢复会话记录后核实，避免重复办理。</small>}
+        </div><CopyText text={text} label="复制问题" />
+      </>}
+    </div>
+  </MessagePrimitive.Root>;
 }
 
 export function AgentWorkspace({
@@ -112,6 +101,8 @@ export function AgentWorkspace({
   onLogout: () => Promise<void>;
 }) {
   const agentId = app.agent_id;
+  const [textSize, setTextSize] = useChatTextSize(app.public_id);
+  const [localDraftKey, setLocalDraftKey] = useState(() => `new-${crypto.randomUUID()}`);
   const [historyItems, setHistoryItems] = useState<Conversation[]>([]);
   const [restoring, setRestoring] = useState(true);
   const cursorRef = useRef(0);
@@ -121,6 +112,7 @@ export function AgentWorkspace({
   const [users, setUsers] = useState<UserEntry[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [run, setRun] = useState<Run | null>(null);
+  const [summaries, setSummaries] = useState<Record<string, Run>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [connection, setConnection] = useState("待建立会话");
@@ -129,8 +121,22 @@ export function AgentWorkspace({
   const runRef = useRef<Run | null>(null);
   const generation = useRef(0);
   const inFlight = useRef(false);
+  const drafts = useRef<Record<string, string>>({});
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [narrow, setNarrow] = useState(() => window.innerWidth <= 900);
+  useEffect(() => {
+    const resize = () => setNarrow(window.innerWidth <= 900);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
   useEffect(() => {
     generation.current++;
+    drafts.current = {};
+    inFlight.current = false;
+    setLocalDraftKey(`new-${crypto.randomUUID()}`);
+    setHistoryQuery("");
     setAgent(null);
     setConversation(null);
     setUsers([]);
@@ -138,6 +144,7 @@ export function AgentWorkspace({
     eventsRef.current = [];
     runRef.current = null;
     setRun(null);
+    setSummaries({});
     setError("");
     setBusy(false);
     if (!agentId) return;
@@ -146,7 +153,7 @@ export function AgentWorkspace({
     const epoch = generation.current;
     Promise.all([
       api.get<Agent>(`/api/v2/runtime/agents/${encodeURIComponent(agentId)}`, controller.signal),
-      api.get<Conversation[]>("/api/v2/runtime/conversations", controller.signal),
+      api.get<Conversation[]>("/api/v2/runtime/conversations?include_empty=false", controller.signal),
     ]).then(async ([value, items]) => {
       if (controller.signal.aborted || epoch !== generation.current) return;
       setAgent(value); setHistoryItems(items);
@@ -189,14 +196,15 @@ export function AgentWorkspace({
           if (!active || epoch !== generation.current) return;
           runRef.current = updated;
           setRun(updated);
+          setSummaries(previous => ({ ...previous, [updated.run_id]: updated }));
         }
         failures = 0;
-        setConnection("事件已连接");
+        setConnection("已连接");
       } catch (e) {
         if (!active) return;
         failures++;
         setConnection(
-          `连接中断，正在从事件 ${Math.max(cursorRef.current, eventCursor(eventsRef.current))} 恢复`,
+          "连接中断，正在恢复",
         );
         if (failures === 1) setError(errorText(e));
       } finally {
@@ -225,7 +233,7 @@ export function AgentWorkspace({
   }
   async function refreshHistory() {
     const epoch = generation.current;
-    try { const items = await api.get<Conversation[]>("/api/v2/runtime/conversations"); if (epoch === generation.current) setHistoryItems(items); }
+    try { const items = await api.get<Conversation[]>("/api/v2/runtime/conversations?include_empty=false"); if (epoch === generation.current) setHistoryItems(items); }
     catch (e) { if (epoch === generation.current) setError(errorText(e)); }
   }
   async function restore(id: string, epoch: number) {
@@ -237,11 +245,13 @@ export function AgentWorkspace({
     runRef.current = snapshot.runs.find(r => r.run_id === last) ?? snapshot.runs.at(-1) ?? null;
     setUsers(snapshot.messages.map(m => ({ id: `history-${m.run_id}`, text: m.text, runId: m.run_id, delivery: "accepted" })));
     setEvents(eventsRef.current); setRun(runRef.current); setConversation(snapshot.conversation);
+    setSummaries(Object.fromEntries(snapshot.runs.map(item => [item.run_id, item])));
     remember(snapshot.conversation); setConnection("历史已恢复，继续读取后续事件");
   }
   async function selectConversation(id: string) {
     if (busy || restoring) return;
     const epoch = ++generation.current;
+    setHistoryOpen(false);
     setRestoring(true); setError(""); setConversation(null); setUsers([]); setEvents([]); setRun(null); eventsRef.current = []; runRef.current = null; cursorRef.current = 0;
     try { await restore(id, epoch); } catch (e) { if (epoch === generation.current) setError(errorText(e)); }
     finally { if (epoch === generation.current) setRestoring(false); }
@@ -260,28 +270,19 @@ export function AgentWorkspace({
     );
     return { ...value, id: value.id || value.conversation_id };
   }
-  async function fresh() {
-    if (busy || restoring) return;
-    setBusy(true);
+  function fresh() {
+    if (busy || restoring || inFlight.current) return;
+    setHistoryOpen(false);
     setError("");
-    try {
-      const value = await startConversation();
-      generation.current++;
-      eventsRef.current = [];
-      cursorRef.current = 0;
-      runRef.current = null;
-      setEvents([]);
-      setUsers([]);
-      setRun(null);
-      setConversation(value);
-      remember(value);
-      void refreshHistory();
-      setConnection("正在连接事件");
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
+    generation.current++;
+    eventsRef.current = [];
+    cursorRef.current = 0;
+    runRef.current = null;
+    setEvents([]); setUsers([]); setRun(null); setSummaries({});
+    setConversation(null);
+    setLocalDraftKey(`new-${crypto.randomUUID()}`);
+    saveLocator(storageKey, { runtime_session_id: identity.runtime_session_id });
+    setConnection("待建立会话");
   }
   async function send(text: string) {
     if (!text.trim() || !agent || restoring || inFlight.current) return;
@@ -290,6 +291,7 @@ export function AgentWorkspace({
     setError("");
     const epoch = generation.current;
     const id = crypto.randomUUID();
+    let messageStarted = false;
     try {
       let current = conversation;
       if (!current) {
@@ -299,6 +301,7 @@ export function AgentWorkspace({
         remember(current);
       }
       setUsers((previous) => [...previous, { id, text, delivery: "pending" }]);
+      messageStarted = true;
       const accepted = await api.post<Run>(
         `/api/v2/runtime/conversations/${current.id}/messages`,
         { text, client_message_id: id },
@@ -318,6 +321,10 @@ export function AgentWorkspace({
     } catch (e) {
       if (epoch === generation.current) {
         setError(errorText(e));
+        if (!messageStarted) {
+          drafts.current[localDraftKey] = text;
+          runtime.thread.composer.setText(text);
+        }
         setUsers((previous) =>
           previous.map((item) =>
             item.id === id ? { ...item, delivery: "uncertain" } : item,
@@ -325,8 +332,7 @@ export function AgentWorkspace({
         );
       }
     } finally {
-      inFlight.current = false;
-      if (epoch === generation.current) setBusy(false);
+      if (epoch === generation.current) { inFlight.current = false; setBusy(false); }
     }
   }
   async function eventAction(
@@ -356,14 +362,6 @@ export function AgentWorkspace({
       if (epoch === generation.current) setBusy(false);
     }
   }
-  async function cancel() {
-    if (!run) return;
-    await eventAction(
-      { run_id: run.run_id, revision: run.revision } as RuntimeEvent,
-      "confirmations",
-      { confirmed: false },
-    );
-  }
   async function cancelRun() {
     if (!run || busy) return;
     setBusy(true);
@@ -381,53 +379,7 @@ export function AgentWorkspace({
       setBusy(false);
     }
   }
-  const messages = useMemo(() => {
-    const result: ThreadMessageLike[] = [];
-    const included = new Set<number>();
-    const latestStatus = new Map<string, number>();
-    for (const event of events)
-      if (event.event_type === "STATUS")
-        latestStatus.set(event.run_id, event.sequence);
-    const appendEvent = (event: RuntimeEvent) => {
-      if (
-        event.event_type === "STATUS" &&
-        latestStatus.get(event.run_id) !== event.sequence
-      )
-        return;
-      included.add(event.sequence);
-      result.push({
-        id: `event-${event.conversation_id}-${event.sequence}`,
-        role: "assistant",
-        content: [
-          {
-            type: "text",
-            text: String(
-              event.payload.message ??
-                event.payload.title ??
-                statuses[String(event.payload.status)] ??
-                "业务响应",
-            ),
-          },
-        ],
-        metadata: { custom: { event } },
-      });
-    };
-    for (const user of users) {
-      result.push({
-        id: user.id,
-        role: "user",
-        content: user.text,
-        metadata: { custom: { uncertain: user.delivery === "uncertain" } },
-      });
-      events
-        .filter((event) => event.run_id === user.runId)
-        .forEach(appendEvent);
-    }
-    events
-      .filter((event) => !included.has(event.sequence))
-      .forEach(appendEvent);
-    return result;
-  }, [users, events]);
+  const messages = useMemo(() => groupedMessages(users, events), [users, events]);
   const ui = conversation?.runtime_ui ?? app.runtime_ui;
   useEffect(() => {
     let active = true, url = "";
@@ -440,11 +392,15 @@ export function AgentWorkspace({
     return () => { active = false; if (url) URL.revokeObjectURL(url); };
   }, [api, ui.icon.kind, ui.icon.value]);
   const running = busy || restoring || (!!run && processing.has(run.status));
+  const catalog = app.synthetic_catalog?.id === "zhiyu-v1" ? app.synthetic_catalog : null;
+  // Current state is supplied by the server, including during history restoration.
+  const practiceEvent = [...events].reverse().find(event => event.event_type === "RESULT" && typeof event.payload.practice_active === "boolean");
+  const practiceActive = practiceEvent ? practiceEvent.payload.practice_active === true : conversation?.practice_active === true;
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages,
     convertMessage: (message) => message,
     isRunning: running,
-    isDisabled: !agent || restoring,
+    isDisabled: !agent || restoring || busy,
     onNew: async (message: AppendMessage) => {
       const text = message.content
         .filter((part) => part.type === "text")
@@ -454,160 +410,63 @@ export function AgentWorkspace({
     },
     onCancel: cancelRun,
   });
-  return (
-    <div className={`agent-layout application-runtime ${embedded ? "embedded" : ""} ${!ui.show_history ? "hide-history" : ""}`} style={{ "--app-accent": ui.primary_color } as React.CSSProperties}>
-      {!embedded && ui.show_history && (
-        <aside className="agent-sidebar">
-          <div className="runtime-brand"><ApplicationIcon ui={ui} assetUrl={iconUrl} /><strong>{ui.title}</strong></div>
-          <button className="new-chat" disabled={!agent || busy || restoring} onClick={() => void fresh()}><Plus size={18} />开始新会话</button>
-          <div className="nav-label">历史会话</div>
-          <div className="agent-nav conversation-history">
-            {historyItems.map(item => <button key={item.id} disabled={busy || restoring} className={item.id === conversation?.id ? "active" : ""} onClick={() => void selectConversation(item.id)}>
-              <MessageSquare size={16} /><span>{item.title || "新会话"}<small>{item.updated_at ? new Date(item.updated_at).toLocaleDateString() : ""}</small></span>
-            </button>)}
-            {!historyItems.length && <p className="muted small">开始对话后，会话将显示在这里。</p>}
-          </div>
-          <div className="sidebar-bottom"><p>{identity.user_id}<br />仅使用当前应用已授权功能</p><button onClick={() => void onLogout()}><LogOut size={16} />退出</button></div>
-        </aside>
-      )}
-      <main className="chat-main">
-        <header className="chat-header">
-          <div className="chat-heading-icon">
-            <ApplicationIcon ui={ui} assetUrl={iconUrl} />
-          </div>
-          <div>
-            <h1>{ui.title}</h1>
-            <p>
-              {agent
-                ? `${agent.capabilities?.length ?? 0} 项已授权功能 · ${agent.fixture_mode ? "本地开发夹具" : "已发布业务能力"}`
-                : "选择已发布的智能体"}
-            </p>
-          </div>
-          <div className="chat-header-right">
-            {identity.fixture_mode && <Badge tone="warning">开发环境</Badge>}
-            <div className={`runtime-header-actions ${embedded || !ui.show_history ? "always" : "compact"}`}>
-                <button
-                  className="secondary"
-                  disabled={!agent || busy}
-                  onClick={() => void fresh()}
-                >
-                  <Plus size={15} />
-                  新会话
-                </button>
-                <button
-                  className="icon-button"
-                  aria-label="退出会话"
-                  onClick={() => void onLogout()}
-                >
-                  <LogOut size={18} />
-                </button>
-            </div>
-          </div>
-        </header>
-        {error && (
-          <div className="chat-notice">
-            <Notice kind="error">
-              {error}
-              <button
-                className="text-button"
-                disabled={busy || restoring}
-                onClick={() => {
-                  if (conversation) void selectConversation(conversation.id);
-                  else { setError(""); void refreshHistory(); }
-                }}
-              >
-                恢复会话记录
-              </button>
-            </Notice>
-          </div>
-        )}
-        {!agent && !restoring ? (
-          <Empty title="暂无可运行的智能体">
-            请由维护者在 Console 组合并发布功能，或检查当前身份授权。
-          </Empty>
-        ) : (
-          <AssistantRuntimeProvider runtime={runtime}>
-            <Actions.Provider value={{ run, busy: busy || restoring, onAction: eventAction, onDownload: download }}>
-              <ThreadPrimitive.Root className="thread-root">
-                <ThreadPrimitive.Viewport className="thread-viewport">
-                  {users.length === 0 && (
-                    <div>
-                      <Welcome ui={ui} assetUrl={iconUrl} disabled={busy || restoring} onSelect={text => void send(text)} />
-                      {app.fixture_mode && <p className="runtime-fixture-note">开发夹具 · 仅用于本地流程验证，不代表真实业务或 SSO 验收</p>}
-                    </div>
-                  )}
-                  <ThreadPrimitive.Messages
-                    components={{
-                      UserMessage: ChatMessage,
-                      AssistantMessage: ChatMessage,
-                    }}
-                  />
-                  <ThreadPrimitive.ScrollToBottom
-                    className="scroll-bottom"
-                    aria-label="滚动至最新消息"
-                  >
-                    <ArrowDown size={17} />
-                  </ThreadPrimitive.ScrollToBottom>
-                </ThreadPrimitive.Viewport>
-                <div className="composer-wrap">
-                  <RuntimeProcessingSummary run={run} />
-                  {run && (
-                    <div className="conversation-status">
-                      <span className="status-dot" />
-                      {statuses[run.status] ?? run.status}
-                      <span>{connection}</span>
-                      {["WAITING_INPUT", "WAITING_CONFIRMATION"].includes(
-                        run.status,
-                      ) && (
-                        <button
-                          className="text-button"
-                          onClick={() => void cancelRun()}
-                        >
-                          取消当前请求
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  <ComposerPrimitive.Root className="composer">
-                    <ComposerPrimitive.Input
-                      placeholder={ui.input_placeholder}
-                      autoFocus
-                      className="composer-input"
-                      aria-label="业务诉求"
-                    />
-                    <div className="composer-actions">
-                      <span>
-                        <ShieldCheck size={13} />
-                        可信执行 · 可追溯结果
-                      </span>
-                      {running ? (
-                        <button
-                          className="send-button"
-                          type="button"
-                          aria-label="停止当前请求"
-                          onClick={() => void cancelRun()}
-                        >
-                          <Square size={16} />
-                        </button>
-                      ) : (
-                        <ComposerPrimitive.Send
-                          className="send-button"
-                          aria-label="发送"
-                        >
-                          <ArrowUp size={20} />
-                        </ComposerPrimitive.Send>
-                      )}
-                    </div>
-                  </ComposerPrimitive.Root>
-                  <p className="composer-footnote">
-                    结果由业务系统提供，请核对重要信息。
-                  </p>
-                </div>
-              </ThreadPrimitive.Root>
-            </Actions.Provider>
-          </AssistantRuntimeProvider>
-        )}
-      </main>
+  const groupedHistory = historyGroups(historyItems, historyQuery);
+  const historyPanel = <>
+    <div className="runtime-brand"><ApplicationIcon ui={ui} assetUrl={iconUrl} /><strong>{ui.title}</strong>
+      {!embedded && !narrow && <button className="icon-button" aria-label="收起历史会话" onClick={() => setHistoryCollapsed(true)}><PanelLeftClose size={17} /></button>}
     </div>
-  );
+    <button className="new-chat" disabled={!agent || busy || restoring} onClick={() => void fresh()}><Plus size={17} />开始新会话</button>
+    <label className="history-search"><Search size={15} /><input aria-label="搜索历史会话" placeholder="搜索会话" value={historyQuery} onChange={e => setHistoryQuery(e.target.value)} /></label>
+    <nav className="conversation-history" aria-label="历史会话">
+      {groupedHistory.map(([label, items]) => <section key={label}><h2>{label}</h2>{items.map(item => <button key={item.id} disabled={busy || restoring} aria-current={item.id === conversation?.id ? "page" : undefined} className={item.id === conversation?.id ? "active" : ""} onClick={() => void selectConversation(item.id)}><MessageSquare size={15} /><span>{item.title || "新会话"}</span></button>)}</section>)}
+      {!groupedHistory.length && <p className="history-empty">{historyQuery ? "没有匹配的会话" : "您的对话会保存在这里"}</p>}
+    </nav>
+    <div className="sidebar-bottom"><button onClick={() => void onLogout()}><LogOut size={15} />结束访问</button></div>
+  </>;
+  return <div className={`agent-layout application-runtime ${embedded ? "embedded" : ""} ${historyCollapsed || !ui.show_history ? "history-collapsed" : ""}`} style={{ "--app-accent": ui.primary_color, "--text-scale": textScale[textSize] } as React.CSSProperties}>
+    {!embedded && ui.show_history && !historyCollapsed && !narrow && <aside className="agent-sidebar">{historyPanel}</aside>}
+    <main className="chat-main">
+      <header className="chat-header">
+        {ui.show_history && (embedded || narrow || historyCollapsed) && <button className="icon-button" aria-label="展开历史会话" onClick={() => embedded || narrow ? setHistoryOpen(true) : setHistoryCollapsed(false)}><PanelLeftOpen size={19} /></button>}
+        <ApplicationIcon ui={ui} assetUrl={iconUrl} />
+        <div className="chat-heading"><h1>{ui.title}</h1>{conversation && <p>{historyItems.find(item=>item.id===conversation.id)?.title || conversation.title || "新会话"}</p>}</div>
+        <div className="chat-header-right"><TextSizeControl value={textSize} onChange={setTextSize} /><button className="icon-button" aria-label="新会话" title="新会话" disabled={!agent || busy || restoring} onClick={() => void fresh()}><Plus size={19} /></button>
+          {(embedded || !ui.show_history || historyCollapsed || narrow) && <button className="icon-button" aria-label="退出会话" title="结束访问" onClick={() => void onLogout()}><LogOut size={17} /></button>}
+        </div>
+      </header>
+      {catalog && practiceActive && <div className="zhiyu-context-bar">
+        <button className="end-practice" type="button" disabled={running || !!run && ["WAITING_INPUT", "WAITING_CONFIRMATION"].includes(run.status)} onClick={() => void send("结束陪练，并总结本次陪练反馈。")}>结束陪练并查看反馈</button>
+      </div>}
+      {error && <div className="chat-notice"><Notice kind="error">{error}<button className="text-button" disabled={busy || restoring} onClick={() => {
+        if (conversation) void selectConversation(conversation.id); else { setError(""); void refreshHistory(); }
+      }}>恢复会话记录</button></Notice></div>}
+      {!agent && !restoring ? <Empty title="当前应用暂不可用">请稍后重试，或联系应用维护者。</Empty> : <AssistantRuntimeProvider runtime={runtime}>
+        <Actions.Provider value={{ run, summaries, busy: busy || restoring, onAction: eventAction, onDownload: download, onCancel: cancelRun }}>
+          <ThreadPrimitive.Root className="thread-root">
+            <ThreadPrimitive.Viewport className="thread-viewport">
+              {!users.length && <Welcome ui={ui} assetUrl={iconUrl} disabled={busy || restoring} onSelect={text => { runtime.thread.composer.setText(text); document.querySelector<HTMLTextAreaElement>(".composer-input")?.focus(); }} />}
+              <ThreadPrimitive.Messages components={{ UserMessage: ChatMessage, AssistantMessage: ChatMessage }} />
+              <ThreadPrimitive.ScrollToBottom className="scroll-bottom" aria-label="滚动至最新消息"><ArrowDown size={15} /><span>回到最新</span></ThreadPrimitive.ScrollToBottom>
+            </ThreadPrimitive.Viewport>
+            <div className="composer-wrap">
+              <ComposerPrimitive.Root className="composer">
+                <ComposerDraft conversationKey={conversation?.id ?? localDraftKey} drafts={drafts} />
+                <ComposerPrimitive.Input placeholder={ui.input_placeholder} autoFocus cancelOnEscape={false} className="composer-input" aria-label="业务诉求" />
+                <div className="composer-actions"><span>Enter 发送 · Shift + Enter 换行</span>
+                  {running ? <button className="send-button" type="button" aria-label="停止当前请求" disabled={!run || busy || restoring} onClick={() => void cancelRun()}><Square size={15} /></button> : <ComposerPrimitive.Send className="send-button" aria-label="发送"><ArrowUp size={19} /></ComposerPrimitive.Send>}
+                </div>
+              </ComposerPrimitive.Root>
+              {connection.includes("中断") && <p className="runtime-connection" role="status">正在恢复连接，已受理的请求不会重复提交。</p>}
+            </div>
+          </ThreadPrimitive.Root>
+        </Actions.Provider>
+      </AssistantRuntimeProvider>}
+    </main>
+    <Dialog.Root open={historyOpen} onOpenChange={setHistoryOpen}>
+      <Dialog.Portal><Dialog.Overlay className="runtime-dialog-overlay" /><Dialog.Content className="runtime-history-dialog" style={{ "--app-accent": ui.primary_color, "--text-scale": textScale[textSize] } as React.CSSProperties}>
+        <Dialog.Title className="runtime-dialog-title">会话</Dialog.Title><Dialog.Description className="runtime-sr-only">搜索历史或开始新会话。切换会话不会重新提交请求。</Dialog.Description>
+        <Dialog.Close className="runtime-dialog-close" aria-label="关闭历史会话"><X size={18} /></Dialog.Close>{historyPanel}
+      </Dialog.Content></Dialog.Portal>
+    </Dialog.Root>
+  </div>;
 }

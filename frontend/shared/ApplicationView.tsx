@@ -14,7 +14,7 @@ export function Welcome({ ui, assetUrl, onSelect, disabled = false }: {
     <h2>{ui.welcome_message}</h2>
     <p>{ui.description}</p>
     <div className="suggestions">
-      {ui.suggested_questions.map((text, index) => <button key={`${text}-${index}`} disabled={disabled || !onSelect} onClick={() => onSelect?.(text)}>
+      {ui.suggested_questions.filter(text => text.trim()).map((text, index) => <button key={`${text}-${index}`} disabled={disabled || !onSelect} onClick={() => onSelect?.(text)}>
         <MessageSquare size={16} /><span>{text}</span><ArrowUp size={15} />
       </button>)}
     </div>

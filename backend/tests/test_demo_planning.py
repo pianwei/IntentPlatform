@@ -429,7 +429,10 @@ def test_mocked_model_plan_executes_condition_and_result_chain(client, admin, mo
     run_id = _message(client, admin, cid, "A002 的账户状态和 C001 的工单如何？")
     state = _drive(client, admin, run_id)
     assert state["status"] == "SUCCEEDED", state
-    assert [row["status"] for row in state["steps"]] == ["SUCCEEDED", "SUCCEEDED"]
+    assert state["steps"] == []
+    trace = client.get(f"/api/v2/management/workspaces/ws-dev/runs/{run_id}/trace", headers=admin)
+    assert trace.status_code == 200
+    assert [row["status"] for row in trace.json()["steps"]] == ["SUCCEEDED", "SUCCEEDED"]
     assert len(state["calls"]) == 2
 
 
@@ -536,7 +539,7 @@ def test_demo_direction_contract_is_versioned_on_legacy_catalog_upgrade(client, 
     agent = _seed(client, admin)["agent"]
     with Session(engine) as db, db.begin():
         set_identity(db, "dev-admin")
-        function = next(row for row in db.scalars(select(Function))
+        function = next(row for row in db.scalars(select(Function).where(Function.id.in_(agent["capability_ids"])))
                         if row.definition["connector"].get("workflow_id") == "demo.transaction.list")
         function_id = function.id
         previous_version = function.latest_version

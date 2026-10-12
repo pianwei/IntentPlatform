@@ -198,21 +198,6 @@ def structured_model_call(snapshot: dict, user_id: str, workspace_id: str, syste
     config, secret = _connection(snapshot, user_id, workspace_id)
     if (config["endpoint"] == DEEPSEEK_CHAT_COMPLETIONS_URL and
             settings().env == "development" and settings().allow_public_deepseek_model_test):
-        # A development public call may include only this known synthetic
-        # 20-function catalog, never real or ad-hoc fixture descriptions.
-        from .demo.catalog import function_packages
-
-        expected = {package["key"] for package in function_packages()}
-        capabilities = snapshot.get("capabilities")
-
-        def fixture_workflow(item):
-            definition = item.get("definition") if isinstance(item, dict) else None
-            connector = definition.get("connector") if isinstance(definition, dict) else None
-            if isinstance(connector, dict) and connector.get("kind") == "fixture":
-                return connector.get("workflow_id")
-            return None
-
-        workflows = [fixture_workflow(item) for item in capabilities] if isinstance(capabilities, list) else []
-        if len(workflows) != len(expected) or set(workflows) != expected:
-            raise ValueError("Public model testing requires the 20-function demo release")
+        from .public_demo import assert_synthetic_snapshot
+        assert_synthetic_snapshot(snapshot)
     return invoke_structured(config, secret, system, user)

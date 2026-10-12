@@ -194,8 +194,7 @@ def test_deepseek_profile_version_pins_thinking_mode(model_client, admin, master
                         lambda url, *, payload, headers, timeout: seen.append(payload) or
                         {"choices": [{"finish_reason": "stop", "message": {"content": '{"ready":true}'}}]})
     snapshot = {"model_profile": old_snapshot,
-                "capabilities": [{"definition": {"connector": {"kind": "fixture",
-                                                            "workflow_id": package["key"]}}}
+                "capabilities": [{"definition": package["definition"]}
                                  for package in function_packages()]}
     assert structured_model_call(snapshot, "dev-admin", "ws-dev", 'JSON {"ready":true}', "test") == {"ready": True}
     assert seen[0]["thinking"] == {"type": "disabled"}
@@ -282,9 +281,9 @@ def test_public_deepseek_requires_development_opt_in(monkeypatch):
     with pytest.raises(ValueError, match="allowlisted"):
         validate_config(config)
     with pytest.raises(ValueError, match="development-only"):
-        Settings(_env_file=None, env="test", allow_public_deepseek_model_test=True)
+        Settings(_env_file=None, env="test", identity_mode="local", allow_public_deepseek_model_test=True)
     with pytest.raises(ValueError, match="development-only"):
-        Settings(_env_file=None, env="production", allow_public_deepseek_model_test=True)
+        Settings(_env_file=None, env="production", identity_mode="local", allow_public_deepseek_model_test=True)
 
 
 def test_public_deepseek_runtime_accepts_only_fixture_release(monkeypatch):
@@ -293,21 +292,21 @@ def test_public_deepseek_runtime_accepts_only_fixture_release(monkeypatch):
     seen = []
     monkeypatch.setattr("intent_platform.model_profiles.invoke_structured",
                         lambda *a: seen.append(a) or {"ready": True})
-    fixtures = [{"definition": {"connector": {"kind": "fixture", "workflow_id": package["key"]}}}
+    fixtures = [{"definition": package["definition"]}
                 for package in function_packages()]
     real = {"definition": {"connector": {"kind": "http", "workflow_id": fixtures[0]["definition"]["connector"]["workflow_id"]}}}
     snapshot = {"capabilities": fixtures}
     assert structured_model_call(snapshot, "dev-admin", "ws-dev", "JSON", "synthetic") == {"ready": True}
     assert len(seen) == 1
+    assert structured_model_call({"capabilities": fixtures[:3]}, "dev-admin", "ws-dev", "JSON", "synthetic") == {"ready": True}
     alien = {"definition": {"connector": {"kind": "fixture", "workflow_id": "other-demo"}}}
     for blocked in ({"capabilities": fixtures[:-1] + [real]},
                     {"capabilities": fixtures[:-1] + [alien]},
-                    {"capabilities": fixtures[:-1]},
                     {"capabilities": fixtures[:-1] + [fixtures[0]]},
                     {"capabilities": [{"definition": None}]}, {}):
-        with pytest.raises(ValueError, match="20-function demo release"):
+        with pytest.raises(ValueError):
             structured_model_call(blocked, "dev-admin", "ws-dev", "JSON", "synthetic")
-    assert len(seen) == 1
+    assert len(seen) == 2
 
 
 @pytest.mark.parametrize("status,category", [(401, "MODEL_AUTH_REJECTED"),

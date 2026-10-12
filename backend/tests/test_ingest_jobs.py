@@ -1,6 +1,8 @@
 """E2 local PostgreSQL contract tests; all source content is synthetic."""
 import json
 import subprocess
+import os
+from pathlib import Path
 import sys
 import threading
 import uuid
@@ -167,7 +169,8 @@ def test_workspace_cap_and_expired_attempt_fence(client, admin, monkeypatch):
 def test_exited_claiming_process_is_recovered(client, admin):
     queued = enqueue_file(client, admin, b"after exit", "exit.txt")
     child = subprocess.run([sys.executable, "-c", "from intent_platform.ingest_worker import claim_one; print(claim_one()['id'])"],
-                           capture_output=True, text=True, timeout=10, check=True)
+                           capture_output=True, text=True, timeout=10, check=True,
+                           env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
     assert child.stdout.strip() == queued["job_id"]
     assert status(client, admin, queued["job_id"])["status"] == "RUNNING"
     with Session(engine) as db, db.begin():

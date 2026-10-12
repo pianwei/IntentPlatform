@@ -46,7 +46,7 @@ def guard_environment():
         raise RuntimeError("Both database URLs must identify the same local server")
     if runtime.username != "intent_app" or owner.username != "intent_owner":
         raise RuntimeError("Restricted runtime and separate migration roles required")
-    if os.environ.get("INTENT_ENV") != "test":
+    if os.environ.get("INTENT_ENV") != "test" or os.environ.get("INTENT_IDENTITY_MODE") != "legacy-test":
         raise RuntimeError("Process faults require the test environment")
     report_dir = Path(os.environ["INTENT_PROCESS_FAULT_REPORT_DIR"]).resolve()
     if not report_dir.is_relative_to((PROJECT / "output" / "process-faults").resolve()) or not report_dir.is_dir():
@@ -207,7 +207,7 @@ class FaultCase:
         self.env = {key: value for key, value in os.environ.items() if not key.startswith("INTENT_")}
         for key in ("INTENT_DATABASE_URL", "INTENT_MIGRATION_DATABASE_URL", "INTENT_PROCESS_FAULTS_ENABLED", "INTENT_PROCESS_FAULT_REPORT_DIR"):
             self.env[key] = os.environ[key]
-        self.env.update({"INTENT_ENV": "test", "INTENT_MODEL_MODE": "fixture", "INTENT_ALLOW_DEV_AUTH": "true",
+        self.env.update({"INTENT_ENV": "test", "INTENT_IDENTITY_MODE": "legacy-test", "INTENT_MODEL_MODE": "fixture", "INTENT_ALLOW_DEV_AUTH": "true",
                          "INTENT_WORKER_LEASE_SECONDS": "1", "INTENT_WORKER_POLL_SECONDS": "0.1", "INTENT_MODEL_TIMEOUT": "1",
                          "INTENT_CONFIRMATION_SECONDS": "300", "INTENT_TOKEN_SECONDS": "3600",
                          "INTENT_CONNECTOR_TARGETS_JSON": json.dumps({"ws-dev": [{"origin": self.origin, "path_prefix": "/fixture", "kinds": ["http"]}]}),

@@ -45,6 +45,8 @@ class Integration(TrustModel):
 
 def integration_catalog(ws):
     cfg = settings(); result = {}
+    if cfg.identity_mode == "local":
+        return {"local": {"label": "本地账号与公开访问", "version": "local-v1", "workspace_ids": [ws], "channels": ["chat", "embed"], "origins": [], "agent_ids": [], "user_ids": [], "fixture_mode": False}}
     data = json.loads(cfg.integrations_json)
     if not isinstance(data, dict): raise ValueError("Invalid server integration catalog")
     for ref, raw in data.items():
@@ -58,6 +60,9 @@ def integration_catalog(ws):
 
 
 def token_integration(token):
+    if settings().identity_mode == "local":
+        if token.source != "local": raise ValueError("Historical identity is read-only")
+        return "local"
     if token.source == "development":
         if settings().env == "production" or not settings().allow_dev_auth: raise ValueError("Development identity unavailable")
         return "development"
@@ -68,6 +73,9 @@ def token_integration(token):
 
 def selected_profiles(agent):
     catalog = integration_catalog(agent.workspace_id)
+    if settings().identity_mode == "local":
+        if "local" in agent.revoked_integration_refs: raise ValueError("Local application access is revoked")
+        return catalog
     selected = agent.integration_refs
     if not selected or any(ref not in catalog or ref in agent.revoked_integration_refs for ref in selected):
         raise ValueError("Select currently approved, non-revoked integrations before publication")
@@ -82,12 +90,16 @@ def selected_profiles(agent):
 def integration_allowed(agent, release, token, channel, origin=None, bound_id=None, policy_snapshot=None):
     try:
         ref = token_integration(token)
+        if settings().identity_mode == "local":
+            policy = (release.snapshot if policy_snapshot is None else policy_snapshot).get("identity_policy", {})
+            return ref == "local" and (bound_id is None or bound_id == "local") and "local" not in agent.revoked_integration_refs and policy.get("version") == "local-v1" and release.snapshot.get("identity_policy", {}).get("version") == "local-v1"
         if bound_id is not None and bound_id != ref: return False
         if ref in agent.revoked_integration_refs: return False
         profile = integration_catalog(agent.workspace_id).get(ref)
         if not profile or channel not in profile["channels"]: return False
         policy = (release.snapshot if policy_snapshot is None else policy_snapshot).get("identity_policy")
         if policy and (policy.get("version") != "integration-v1" or policy.get("profiles", {}).get(ref) != profile): return False
+        if ref == "local": return token.source == "local"
         if ref == "development": return True
         claim = Delegation.model_validate({k: token.delegation[k] for k in Delegation.model_fields if k in token.delegation})
         for key, value in (("workspace_ids", agent.workspace_id), ("agent_ids", agent.id), ("user_ids", token.user_id)):
@@ -98,6 +110,8 @@ def integration_allowed(agent, release, token, channel, origin=None, bound_id=No
 
 
 def trusted_members(ws):
+    if settings().identity_mode == "local":
+        return None  # Local membership records replace the retired SSO roster.
     data = json.loads(settings().membership_grants_json)
     if not isinstance(data, dict): raise ValueError("Invalid membership grants")
     if ws not in data: return None
@@ -120,12 +134,18 @@ def member_authority(member):
 def member_ceiling(ws, user_id, member=None):
     roster = trusted_members(ws)
     if roster is not None: return roster.get(user_id, {"roles": [], "active": False})
-    return {"roles": member.role_ceiling, "active": True} if member else {"roles": [], "active": False}
+    if member:
+        return {"roles": member.role_ceiling, "active": True}
+    # A trusted directory establishes identity only; this does not create a
+    # membership. The space administrator explicitly chooses the actual roles.
+    from .workspace_admin import identity_directory
+    return {"roles": sorted(ROLES), "active": True} if user_id in identity_directory() else {"roles": [], "active": False}
 
 
 def identity_workspace_allowed(token, ws):
     try:
         ref = token_integration(token)
+        if ref == "local": return token.source == "local"
         if ref == "development": return True
         claim = Delegation.model_validate({k: token.delegation[k] for k in Delegation.model_fields if k in token.delegation})
         profile = integration_catalog(ws).get(ref)

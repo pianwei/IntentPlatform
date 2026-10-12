@@ -5,7 +5,9 @@ x-environment: &environment
   INTENT_DATABASE_URL: postgresql+psycopg://intent_app:local-app-only@postgres:5432/intent
   INTENT_MODEL_MODE: fixture
   INTENT_MODEL_SECRET_KEY: development-demo-only-key-change-for-private-use
-  INTENT_ALLOW_DEV_AUTH: "true"
+  INTENT_ALLOW_DEV_AUTH: "false"
+  INTENT_IDENTITY_MODE: local
+  INTENT_PLATFORM_ADMINS_JSON: '["offline-admin"]'
   INTENT_ALLOWED_HOSTS: localhost,127.0.0.1,api,web
   INTENT_CORS_ORIGINS: http://localhost:5173
 services:

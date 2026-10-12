@@ -1,74 +1,45 @@
 import type { FunctionDefinition } from "../../shared/types";
-import { Notice } from "../../shared/ui";
+import { useState, useEffect } from "react";
+import { SchemaFieldsEditor, type FieldSchema } from "./SchemaFieldsEditor";
 
-type OutputField = { type?: string | string[]; maxLength?: number; maxItems?: number; items?: Record<string, unknown>; [key: string]: unknown };
-type OutputSchema = { type: "object"; properties: Record<string, OutputField>; required: string[]; additionalProperties: false; [key: string]: unknown };
-
-function asSchema(value: FunctionDefinition["output_schema"]): OutputSchema | null {
-  if (!value || value.type !== "object" || !value.properties || typeof value.properties !== "object" || Array.isArray(value.properties)) return null;
-  return value as OutputSchema;
-}
-
-function renameKey<T>(items: Record<string, T>, oldKey: string, newKey: string): Record<string, T> {
-  return Object.fromEntries(Object.entries(items).map(([key, value]) => [key === oldKey ? newKey : key, value]));
-}
-
-export function OutputMappingEditor({ definition, update }: { definition: FunctionDefinition; update: (patch: Partial<FunctionDefinition>) => void }) {
-  const schema = asSchema(definition.output_schema);
-  const display = definition.presentation.field_map ?? {};
-  const entries = Object.entries(schema?.properties ?? {});
-  const mapped = (field: string) => Object.entries(display).find(([, source]) => source === field)?.[0] ?? field;
-  const change = (next: OutputSchema, fieldMap = display, extra: Partial<FunctionDefinition["presentation"]> = {}) =>
-    update({ output_schema: next, presentation: { ...definition.presentation, ...extra, field_map: fieldMap } });
-  const enable = () => change({ type: "object", properties: { result: { type: "string", maxLength: 2000 } }, required: ["result"], additionalProperties: false }, { 结果: "result" });
-  const add = () => {
-    if (!schema) return;
-    let index = entries.length + 1;
-    while (schema.properties[`field_${index}`]) ++index;
-    const name = `field_${index}`;
-    change({ ...schema, properties: { ...schema.properties, [name]: { type: "string", maxLength: 2000 } }, required: [...(schema.required ?? []), name] }, { ...display, [`字段${index}`]: name });
-  };
-  const remove = (name: string) => {
-    if (!schema) return;
-    const properties = { ...schema.properties }; delete properties[name];
-    change({ ...schema, properties, required: (schema.required ?? []).filter(value => value !== name) }, Object.fromEntries(Object.entries(display).filter(([, value]) => value !== name)));
-  };
-  const changeName = (name: string, next: string) => {
-    if (!schema || next !== name && Object.hasOwn(schema.properties, next)) return;
-    change({ ...schema, properties: renameKey(schema.properties, name, next), required: (schema.required ?? []).map(value => value === name ? next : value) },
-      Object.fromEntries(Object.entries(display).map(([label, value]) => [label, value === name ? next : value])));
-  };
-  const changeLabel = (name: string, next: string) => {
-    const prior = mapped(name);
-    if (next !== prior && Object.hasOwn(display, next)) return;
-    const replacement = { ...display }; delete replacement[prior]; replacement[next] = name;
-    update({ presentation: { ...definition.presentation, field_map: replacement } });
-  };
-  const changeField = (name: string, patch: Partial<OutputField>) => {
-    if (!schema) return;
-    change({ ...schema, properties: { ...schema.properties, [name]: { ...schema.properties[name], ...patch } } });
-  };
-  const changeType = (name: string, type: string) => {
-    const field: OutputField = type === "string" ? { type, maxLength: 2000 } : type === "array" ? { type, maxItems: 100, items: { type: "string", maxLength: 2000 } } : { type };
-    if (schema) change({ ...schema, properties: { ...schema.properties, [name]: field } });
-  };
-  return <section className="semantic-section" aria-label="受控业务输出">
-    <div className="mapping-heading"><h3>业务输出契约与展示边界</h3>{schema && <button type="button" className="text-button" onClick={add}>添加展示字段</button>}</div>
-    <Notice>新发布的真实功能版本需确认输出字段与展示标签。接口返回的额外字段不会自动展示；已发布旧版本保持原契约。数组和表格的复杂结构可在下方完整 JSON 映射中编辑。</Notice>
-    {!schema ? <button type="button" className="secondary" onClick={enable}>配置输出契约</button> : <>
-      <div className="form-grid"><label>结果组件<select value={definition.presentation.component} onChange={event => update({ presentation: { ...definition.presentation, component: event.target.value } })}>{["detail", "table", "text", "markdown", "citation", "file"].map(component => <option key={component} value={component}>{component}</option>)}</select></label>
-        <label>展示标题<input value={definition.presentation.title} onChange={event => update({ presentation: { ...definition.presentation, title: event.target.value } })} /></label></div>
-      {entries.map(([name, field]) => <div className="http-map-row" key={name}>
-        <label>输出字段名<input aria-label={`输出字段名 ${name}`} value={name} onChange={event => changeName(name, event.target.value)} /></label>
-        <label>展示标签<input aria-label={`展示标签 ${name}`} value={mapped(name)} onChange={event => changeLabel(name, event.target.value)} /></label>
-        <label>数据类型<select aria-label={`数据类型 ${name}`} value={typeof field.type === "string" && ["string", "integer", "number", "boolean", "array"].includes(field.type) ? field.type : "other"} onChange={event => changeType(name, event.target.value)}><option value="other" disabled>复杂类型（完整 JSON 中编辑）</option>{["string", "integer", "number", "boolean", "array"].map(kind => <option key={kind} value={kind}>{kind}</option>)}</select></label>
-        <button type="button" className="danger-link" aria-label={`移除输出字段 ${name}`} onClick={() => remove(name)}>移除</button>
-        <label className="checkbox"><input type="checkbox" checked={(schema.required ?? []).includes(name)} onChange={event => change({ ...schema, required: event.target.checked ? [...(schema.required ?? []), name] : (schema.required ?? []).filter(value => value !== name) })} />必需字段</label>
-        {field.type === "string" && <label>最大字符数<input type="number" min="0" max="16000" value={field.maxLength ?? ""} onChange={event => changeField(name, { maxLength: Number(event.target.value) })} /></label>}
-        {field.type === "array" && <label>最大条数<input type="number" min="0" max="100" value={field.maxItems ?? ""} onChange={event => changeField(name, { maxItems: Number(event.target.value) })} /></label>}
-      </div>)}
-      <label className="checkbox"><input type="checkbox" checked={definition.presentation.files_field === "files"} onChange={event => update({ presentation: { ...definition.presentation, files_field: event.target.checked ? "files" : null } })} />允许接口返回内联文件字段 files；仅通过服务端内容与类型检查后生成授权下载</label>
-      <p className="muted small">输出 Schema 限定字段类型、必需项和条数；字段映射限定展示内容。保存后须重新验证及确认来源，旧发布不会被草稿修改。</p>
-    </>}
+export function OutputMappingEditor({ definition, update, onValidityChange }: { definition: FunctionDefinition; update: (patch: Partial<FunctionDefinition>) => void;onValidityChange?:(valid:boolean)=>void }) {
+  const [error,setError]=useState("");
+  const [confirmEmpty,setConfirmEmpty]=useState(false);
+  const noOutput=definition.output_mode==="none";
+  useEffect(()=>{if(noOutput)onValidityChange?.(true);},[noOutput,onValidityChange]);
+  const schema = (definition.output_schema ?? { type: "object", properties: {}, required: [], additionalProperties: false }) as FieldSchema;
+  function change(next: FieldSchema, path?: string[], before?: string, after?: string) {
+    setError("");
+    const previous = definition.presentation.field_map ?? {};
+    const map: Record<string, string> = {};
+    for (const name of Object.keys(next.properties ?? {})) {
+      const oldName = !path?.length && before && name === after ? before : name;
+      const label = Object.entries(previous).find(([, value]) => value === oldName)?.[0] ?? name;
+      map[Object.hasOwn(map, label) ? name : label] = name;
+    }
+    const patch: Partial<FunctionDefinition> = { output_schema: next, presentation: { ...definition.presentation, field_map: map } };
+    if (!path?.length && before) {
+      if (definition.composite?.final_output_mapping) patch.composite = { ...definition.composite, final_output_mapping: Object.fromEntries(Object.entries(definition.composite.final_output_mapping).flatMap(([name, value]) => name === before ? after ? [[after, value]] : [] : [[name, value]])) };
+    }
+    if(before&&after&&definition.result_bindings){const source=[...(path??[]).filter(key=>key!=="$items"),before].join("."),target=[...(path??[]).filter(key=>key!=="$items"),after].join(".");const rename=(value:string)=>value===source?target:value.startsWith(`${source}.`)?`${target}${value.slice(source.length)}`:value;patch.result_bindings=definition.result_bindings.map(binding=>({...binding,collection_path:rename(binding.collection_path),id_field:rename(`${binding.collection_path}.${binding.id_field}`).replace(`${rename(binding.collection_path)}.`,""),label_field:rename(`${binding.collection_path}.${binding.label_field}`).replace(`${rename(binding.collection_path)}.`,"")}));}
+    update(patch);
+  }
+  const composite = definition.execution_kind === "composite";
+  function emptyOutput(){
+    setConfirmEmpty(false);setError("");
+    update({output_mode:"none",output_schema:{type:"object",properties:{},required:[],additionalProperties:false},presentation:{...definition.presentation,field_map:{},files_field:null},result_bindings:[],...(definition.composite?{composite:{...definition.composite,final_output_mapping:{}}}:{} )});
+  }
+  function chooseMode(mode:"fields"|"none"){
+    setError("");
+    if(mode==="fields"){update({output_mode:"fields"});return;}
+    const references=[definition.result_bindings?.length?"返回对象绑定":"",definition.presentation.files_field?"文件输出":"",Object.keys(definition.composite?.final_output_mapping??{}).length?"组合结果映射":""].filter(Boolean);
+    if(references.length){setError(`请先调整${references.join("、")}，再选择无业务数据返回。已有配置已保留。`);return;}
+    if(Object.keys(schema.properties??{}).length||Object.keys(definition.presentation.field_map??{}).length){setConfirmEmpty(true);return;}
+    emptyOutput();
+  }
+  function remove(next:FieldSchema,path:string[],name:string){const removed=[...path.filter(key=>key!=="$items"),name].join(".");if(definition.result_bindings?.some(binding=>[binding.collection_path,`${binding.collection_path}.${binding.id_field}`,`${binding.collection_path}.${binding.label_field}`].some(value=>value===removed||value.startsWith(`${removed}.`)))){setError("该输出字段仍被结果对象绑定使用，请先调整业务映射再移除。");return;}change(next,path,name);}
+  return <section className="form-section" aria-label="业务输出字段"><div className="section-caption"><h2>返回内容</h2><span className="optional">选填</span></div><label className="field">返回方式<select aria-label="返回方式" value={noOutput?"none":"fields"} onChange={e=>chooseMode(e.target.value as "fields"|"none")}><option value="fields">业务字段或文件</option><option value="none">无业务数据返回 · 仅执行状态</option></select></label>{error&&<p role="alert" className="field-error">{error}</p>}{confirmEmpty&&<div className="inline-confirm"><p>当前返回字段将从草稿中移除。已发布版本不受影响。</p><button type="button" className="button" onClick={()=>setConfirmEmpty(false)}>保留返回字段</button><button type="button" className="button" onClick={emptyOutput}>确认仅返回执行状态</button></div>}{noOutput?<p className="muted small">不向用户或模型提供接口响应内容，仍按接口约定判断执行状态。</p>:<><SchemaFieldsEditor schema={schema} label="输出字段" mode="output" onValidityChange={onValidityChange} onChange={change} onRename={change} onRemove={remove} maxObjectDepth={composite ? 4 : 2} maxArrayDepth={composite ? 3 : 1} />
+    {!composite&&<label className="checkbox"><input type="checkbox" checked={definition.presentation.files_field === "files"} onChange={e => update({ presentation: { ...definition.presentation, files_field: e.target.checked ? "files" : null } })} />包含可下载文件</label>}
+    <p className="muted small">回答使用 Markdown。只使用已配置字段；也可以仅返回文件。</p></>}
   </section>;
 }

@@ -7,6 +7,8 @@ export type Identity = {
   agent_id?: string;
   runtime_session_id?: string;
   expires_at?: string;
+  recovery_secret?: string | null;
+  demo_persona?: string | null;
 };
 export type AccessPolicy = { access_mode: "workspace" | "allowlist"; allowed_users: string[] };
 export type Channels = { chat: boolean; embed: boolean };
@@ -20,8 +22,18 @@ export type RuntimeUI = {
   input_placeholder: string;
   show_history: boolean;
 };
-export type PublicApp = { public_id: string; agent_id: string; release_id: string; runtime_ui: RuntimeUI; channels: Channels; fixture_mode: boolean };
+export type SyntheticCatalog = { id: string; version: number; personas: { id: string; name: string; description: string }[]; default_persona: string; model_answer_policy: string };
+export type PublicApp = { public_id: string; agent_id: string; release_id: string; runtime_ui: RuntimeUI; channels: Channels; fixture_mode: boolean; synthetic_catalog?: SyntheticCatalog | null };
 export type FunctionDefinition = {
+  authoring_version?: "legacy" | "function-v2";
+  output_examples?: unknown[];
+  execution_kind?: "direct" | "composite";
+  composite?: {
+    mode?: "template" | "document";
+    skill_version_id: string;
+    dependencies: { function_id: string; version: number }[];
+    final_output_mapping: Record<string, { $step: string; path: string }>;
+  } | null;
   compiler_version?: "finite-json-v1" | "finite-json-v2";
   domain_refs?: { package_id: string; version: number }[];
   participant_roles?: { role: string; type: string; required: boolean; min_count: number; max_count: number }[];
@@ -38,6 +50,7 @@ export type FunctionDefinition = {
   aliases: string[];
   input_schema: Record<string, unknown>;
   output_schema?: Record<string, unknown> | null;
+  output_mode?: "fields" | "none";
   connector: {
     version?: string;
     http_mapping?: { path: Record<string, string>; query: Record<string, string>; headers: Record<string, string>; body: Record<string, string> } | null;
@@ -64,6 +77,18 @@ export type FunctionDefinition = {
   positive_examples: Record<string, unknown>[];
   negative_examples: Record<string, unknown>[];
 };
+export type FunctionOptions = {
+  default_domain_ref: { package_id: string; version: number } | null;
+  default_result_type: string;
+  domain_refs?: { package_id: string; version: number }[];
+  compiler_version: "finite-json-v2";
+  http_connector_version: "2";
+  entities: { id: string; label: string; source_name?: string; domain_ref?: { package_id: string; version: number } }[];
+  result_types: { id: string; label: string; domain_ref?: { package_id: string; version: number } }[];
+  actions: { key: string; name: string; effect: "READ_ONLY" | "WRITE"; source_name?: string; description?: string }[];
+  relations: { id: string; label?: string; source_name?: string; source_type: string; target_type: string; domain_ref?: { package_id: string; version: number } }[];
+  resolvers: { reference: string; version: string; entity_type: string }[];
+};
 export type Capability = {
   id: string;
   workspace_id: string;
@@ -74,7 +99,7 @@ export type Capability = {
   definition: FunctionDefinition;
   latest_version: number | null;
   is_fixture: boolean;
-  validation?: unknown;
+  validation?: Validation | null;
 };
 export type Agent = {
   id: string;
@@ -99,6 +124,7 @@ export type Agent = {
   suggested_questions: string[];
   fixture_mode: boolean;
   planning_enabled?: boolean;
+  routing_strategy?: "legacy" | "three-layer-v1";
   business_skill_ids?: string[];
   model_profile_id?: string | null;
   capabilities?: { id: string; name: string; description: string }[];
@@ -158,6 +184,7 @@ export type Field = {
   unit?: string | null;
   type: string | string[];
   required: boolean;
+  schema?: Record<string,unknown>;
 };
 export type Choice = { id: string; label: string };
 export type Conversation = {
@@ -171,6 +198,7 @@ export type Conversation = {
   created_at?: string;
   updated_at?: string;
   runtime_ui?: RuntimeUI;
+  practice_active?: boolean;
 };
 export type ConversationHistory = {
   conversation: Conversation;
@@ -180,17 +208,46 @@ export type ConversationHistory = {
   cursor: number;
 };
 export type RuntimeFile = { id: string; filename: string; media_type: string; size: number };
+export type RuntimeResultComponent = {
+  title: string;
+  component: "table" | "detail" | "citation" | "text" | "markdown";
+  data: unknown;
+  fields?: { label: string; value: unknown }[];
+  files?: [];
+};
 export type Validation = {
   valid: boolean;
   revision: number;
   errors: string[];
   checks: Record<string, unknown>;
   probe: unknown;
+  execution_test?: { passed: boolean; revision: number; status: string; valid?:boolean; error?: string; data?: unknown;confirmation?:{run_id:string;revision:number;name:string;arguments:Record<string,unknown>;expires_at?:string|null}|null } | null;
+  failure_execution_test?: Validation["execution_test"];
 };
 export type Release = {
   release_id: string;
   id?: string;
   version: number;
+  created_at?: string | null;
+  summary?: Record<string, unknown>;
   capabilities: { capability_id: string; version: number }[];
   fixture_mode: boolean;
+};
+export type PublishedFunction = { id: string; function_id: string; version: number; definition: FunctionDefinition };
+
+export type AgentCompilation = {
+  valid: boolean;
+  issues: { code: string; message: string; function_id?: string }[];
+  projection: {
+    version: string;
+    entities: { id: string; label: string; function_ids: string[] }[];
+    actions: { key: string; name: string; effect: string; function_ids: string[] }[];
+    skills: { skill_id: string; version_id: string; name: string; function_id?: string }[];
+    explicit_function_ids: string[];
+    dependency_function_ids: string[];
+  } | null;
+};
+export type PlatformContext = {
+  can_manage_workspaces: boolean;
+  identities: { user_id: string; label: string }[];
 };

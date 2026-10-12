@@ -12,7 +12,7 @@ from ..ontology import input_errors
 from .catalog import function_packages
 
 
-_DEFINITIONS = {p["key"]: p["definition"] for p in function_packages()}
+_DEFINITIONS = {p["key"]: p["definition"] for p in function_packages(include_extension=True)}
 _WRITES = {key for key, definition in _DEFINITIONS.items() if definition["effect"] == "WRITE"}
 
 
@@ -80,6 +80,7 @@ def initial_state():
                      "reason": "演示账户状态核查", "status": "OPEN", "history": "2026-09-01 创建"},
         },
         "_operations": {},
+        "_public_customer_permissions": ["C001", "C002", "C003"],
         "_customer_permissions": {"dev-admin": ["*"], "dev-reader": ["C001"], "dev-other": ["*"]},
     }
 
@@ -96,6 +97,9 @@ _DEFAULT_CUSTOMER_PERMISSIONS = {"dev-admin": ["*"], "dev-reader": ["C001"], "de
 def authorized_customers(user_id, state):
     """Local fixture object permissions; never a substitute for bank authority."""
     grants = state.get("_customer_permissions", _DEFAULT_CUSTOMER_PERMISSIONS).get(user_id, [])
+    if user_id.startswith("guest_"):
+        # Synthetic sample data explicitly exposed by the public demo only.
+        grants = state.get("_public_customer_permissions", [])
     return set(state["customers"]) if "*" in grants else set(grants) & set(state["customers"])
 
 
@@ -181,6 +185,9 @@ def _read(key, args, state):
         row = _required(state, "accounts", args["account_id"])
         return {"account_id": row["account_id"], "balance": _money(row["balance_cents"]),
                 "available": _money(row["available_cents"]), "currency": row["currency"]}
+    if key == "demo.account.currency":
+        row = _required(state, "accounts", args["account_id"])
+        return {k: row[k] for k in ("account_id", "currency")}
     if key == "demo.account.status":
         row = _required(state, "accounts", args["account_id"])
         return {k: row[k] for k in ("account_id", "status", "reason")}

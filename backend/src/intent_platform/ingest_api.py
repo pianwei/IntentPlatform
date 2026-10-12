@@ -37,6 +37,8 @@ def _enqueue(db, token, ws, key, kind, filename=None, payload=None, document_id=
     manager(db, token, ws)
     _key(key)
     lock_workspace(db, ws)
+    from .workspace_lifecycle import require_workspace
+    epoch = require_workspace(db, ws)
     existing = db.scalar(select(IngestJob).where(IngestJob.workspace_id == ws,
                           IngestJob.created_by == token.user_id, IngestJob.idempotency_key == key))
     if existing:
@@ -53,7 +55,7 @@ def _enqueue(db, token, ws, key, kind, filename=None, payload=None, document_id=
                          IngestJob.status == "PENDING")) or 0
     if queued >= settings().ingest_max_queued_per_workspace:
         raise HTTPException(429, "Workspace intake queue is full", headers={"Retry-After": "1"})
-    row = IngestJob(workspace_id=ws, created_by=token.user_id, token_id=token.id, idempotency_key=key,
+    row = IngestJob(workspace_id=ws, workspace_epoch=epoch, created_by=token.user_id, token_id=token.id, idempotency_key=key,
                     kind=kind, filename=filename, payload=payload, document_id=document_id,
                     source_revision=source_revision)
     db.add(row); db.flush()

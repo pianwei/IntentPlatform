@@ -59,7 +59,10 @@ def workflow_socket(monkeypatch):
         def do_GET(self):
             path = urlsplit(self.path).path
             observed["gets"].append(path)
-            if path == "/redirect":
+            if path == "/no-content":
+                self.send_response(204)
+                self.end_headers()
+            elif path == "/redirect":
                 self.send_response(302)
                 self.send_header("Location", "/json")
                 self.end_headers()
@@ -242,3 +245,22 @@ def test_http_v2_cannot_publish_accept_encoding_mapping(workflow_socket):
     ).model_dump()
     with pytest.raises(ValueError, match="Mapped headers"):
         connector_checks(definition, "ws-fixture")
+
+
+def test_http_204_is_success_only_for_explicit_status_only_output(workflow_socket):
+    origin, _ = workflow_socket
+    definition = Definition(
+        authoring_version="function-v2", name="状态通知", description="无业务数据",
+        output_mode="none",
+        input_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        output_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        presentation={"field_map": {}},
+        connector={"kind": "http", "version": "2", "method": "GET", "endpoint": origin + "/no-content",
+                   "http_mapping": {"path": {}, "query": {}, "headers": {}, "body": {}}},
+    ).model_dump()
+    result = execute_connector(definition, {}, "call-204", "user-1", "ws-fixture")
+    assert result["status"] == "SUCCEEDED" and result["data"] == {}
+
+    unsafe = {**definition, "success_condition": {"field": "status", "operator": "eq", "value": "ok"}}
+    with pytest.raises(ValueError):
+        execute_connector(unsafe, {}, "call-204-unsafe", "user-1", "ws-fixture")

@@ -6,6 +6,8 @@ import pytest
 os.environ.setdefault("INTENT_DATABASE_URL", "postgresql+psycopg://intent_app:local-app-only@127.0.0.1:54329/intent_test")
 os.environ.setdefault("INTENT_MIGRATION_DATABASE_URL", "postgresql+psycopg://intent_owner:local-owner-only@127.0.0.1:54329/intent_test")
 os.environ.setdefault("INTENT_ENV", "test")
+os.environ.setdefault("INTENT_IDENTITY_MODE", "legacy-test")
+os.environ.setdefault("INTENT_ALLOW_DEV_AUTH", "true")
 os.environ.setdefault("INTENT_MODEL_MODE", "fixture")
 
 
