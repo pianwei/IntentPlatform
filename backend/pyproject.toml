@@ -16,7 +16,7 @@ dependencies = {file = ["requirements.txt"]}
 where = ["src"]
 
 [tool.setuptools.package-data]
-intent_platform = ["migrations/versions/*.json"]
+intent_platform = ["migrations/versions/*.json", "zhiyu/skill_documents/*.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

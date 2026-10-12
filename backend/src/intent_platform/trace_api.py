@@ -25,7 +25,7 @@ LAYERS = ("entity", "dynamics", "planning", "execution")
 DETAIL_KEYS = {
     "entity": {"goal", "fields", "kind", "count", "candidate_count", "object_types", "bound_object_type", "binding_source", "input_fields", "source", "entities", "actions", "negated", "step", "bindings"},
     "dynamics": {"step", "name", "count", "candidate_count", "effect", "actions", "status", "validation", "capability_ids", "semantic", "parameters", "preconditions", "entity_binding", "error_type"},
-    "planning": {"stage", "reason_code", "error_type", "schema_paths", "source", "skill_version_id", "steps", "step", "validation", "status"},
+    "planning": {"stage", "reason_code", "error_type", "http_status", "schema_paths", "source", "skill_version_id", "steps", "step", "validation", "status"},
     "execution": {"step", "status", "call_count", "error_stage"},
 }
 
@@ -54,16 +54,23 @@ TRACE_TITLES = {"goal_recognized":"理解业务目标", "goal_parsed":"识别业
  "confirmation_required":"等待写入确认", "step_dispatched":"调用业务功能", "plan_approved":"计划校验通过", "plan_rejected":"计划未通过校验",
  "clarification_requested":"请求澄清目标", "dependency_blocked":"前置步骤未完成", "reference_unavailable":"所需结果不可用",
  "step_skipped":"条件不满足，跳过步骤", "answer_completed":"完成答复汇总", "step_finished":"业务步骤完成", "status_reconciled":"完成状态核对",
- "model_answer_completed":"模型直接回答完成"}
+ "model_answer_completed":"模型直接回答完成", "model_answer_failed":"模型回答未完成"}
 TRACE_LABELS = {"goal":"业务目标","fields":"参数","input_fields":"输入参数","count":"数量","candidate_count":"候选数量",
  "object_types":"对象类型","entities":"识别对象","bound_object_type":"绑定对象类型","binding_source":"对象来源","source":"处理方式",
  "actions":"业务动作","negated":"排除条件","step":"业务步骤","steps":"计划步骤","bindings":"对象绑定",
  "name":"功能名称","effect":"操作类型","status":"状态","validation":"校验结果","capability_ids":"候选功能",
  "semantic":"关系与单位校验","parameters":"参数校验","preconditions":"前置条件","entity_binding":"对象授权绑定",
  "skill_version_id":"组合规则","stage":"处理阶段","reason_code":"未通过原因","error_type":"错误类别",
- "schema_paths":"问题位置","call_count":"调用次数","error_stage":"异常阶段","kind":"对象种类",
+ "schema_paths":"问题位置","call_count":"调用次数","error_stage":"异常阶段","http_status":"HTTP状态码","kind":"对象种类",
  "type":"对象类型","mention":"用户提及","history_ref":"历史引用","parameter":"参数","role":"业务角色"}
 TRACE_VALUES = {"skill":"业务规则", "model":"模型规划", "model_answer":"模型直接回答", "practice":"模拟陪练", "preview":"工程预览", "passed":"通过", "READ":"查询", "WRITE":"写入",
+ "context_validation":"上下文校验", "classification":"意图分类", "answer_generation":"生成回答",
+ "practice_state_update":"更新陪练状态", "result_persistence":"保存结果",
+ "MODEL_AUTH_REJECTED":"模型认证失败", "MODEL_QUOTA_EXHAUSTED":"模型额度不足", "MODEL_ACCESS_FORBIDDEN":"模型访问受限",
+ "MODEL_RATE_LIMITED":"模型请求被限流", "MODEL_REMOTE_FAILURE":"模型服务异常", "MODEL_REQUEST_REJECTED":"模型请求被拒绝",
+ "MODEL_TIMEOUT":"模型请求超时", "MODEL_NETWORK_ERROR":"网络连接失败", "MODEL_INVALID_RESPONSE":"模型响应格式无效",
+ "MODEL_SYNTHETIC_CATALOG_UNAVAILABLE":"模拟规则文件不可用", "MODEL_SYNTHETIC_CATALOG_REJECTED":"模拟目录校验未通过",
+ "MODEL_CONFIGURATION_UNAVAILABLE":"模型配置或凭据不可用", "MODEL_PROCESSING_ERROR":"模型回答处理失败",
  "SUCCEEDED":"已完成","FAILED":"失败","UNKNOWN":"待核对","SKIPPED":"已跳过","PENDING":"待执行","EXECUTING":"执行中",
  "resolver":"授权对象检索", "history":"会话历史", "user_input_or_prior_result":"用户输入或前一步结果",
  "parameter":"参数","role":"业务角色", "source":"来源", "lookup":"查询", "query":"查询", "aggregate":"统计",

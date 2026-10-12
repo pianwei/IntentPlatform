@@ -1,10 +1,11 @@
 """Synthetic catalog integration, persona isolation and model-only persistence."""
 from copy import deepcopy
+import json
 import pytest
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from intent_platform.db import engine, set_identity
-from intent_platform.models import Agent, Release, Run, Call, RuntimeSession, SyntheticState, Conversation, ExecutionPlan
+from intent_platform.models import Agent, Release, Run, Call, RuntimeSession, SyntheticState, Conversation, ExecutionPlan, Event, ManagementTrace
 from intent_platform.synthetic_runtime import CATALOG_ID
 from test_local_identity import local, bearer, guest
 from conftest import conversation, message, drain
@@ -36,6 +37,14 @@ def test_install_idempotent_release_and_restricted_public_catalog(client, local,
         assert_synthetic_snapshot(snapshot)
         tampered = deepcopy(snapshot); tampered['capabilities'][0]['definition']['description'] += ' arbitrary'
         with pytest.raises(ValueError): assert_synthetic_snapshot(tampered)
+
+
+def test_zhiyu_skill_documents_are_loadable_from_distribution():
+    from intent_platform.zhiyu.document_skills import TEST_INPUTS, business_skill_documents
+    documents=business_skill_documents()
+    assert len(documents)==6
+    assert {item['key'].rsplit('.',1)[-1] for item in documents}==set(TEST_INPUTS)
+    assert all(item['mode']=='document' and len(item['document'])>100 for item in documents)
 
 
 def test_persona_cannot_change_during_recovery_or_inherit_history(client, local, zhiyu):
@@ -123,7 +132,7 @@ def test_failed_model_answer_never_creates_calls(client, local, zhiyu, monkeypat
     from intent_platform import model_answer
     work,g,h,cid,rid=protocol_run(client,zhiyu)
     work['snapshot']=deepcopy(work['snapshot']);work['snapshot']['model_profile']['mode']='openai'
-    def fail(*args): raise ValueError('unavailable')
+    def fail(*args): raise ValueError('MODEL_QUOTA_EXHAUSTED (HTTP 402)')
     monkeypatch.setattr(model_answer,'classify',fail)
     assert model_answer.maybe_answer(work)
     failed=client.get(f'/api/v2/runtime/runs/{rid}',headers=h).json()
@@ -131,6 +140,64 @@ def test_failed_model_answer_never_creates_calls(client, local, zhiyu, monkeypat
     with Session(engine) as db:
         set_identity(db,g['user_id'])
         assert db.scalar(select(func.count()).select_from(Call).where(Call.run_id==rid))==0
+        error_event=db.scalar(select(Event).where(Event.run_id==rid,Event.event_type=='ERROR'))
+        assert error_event.payload['message']=='模型回答暂不可用，请检查模型配置或稍后发起新问题'
+        assert 'MODEL_QUOTA_EXHAUSTED' not in json.dumps(error_event.payload,ensure_ascii=False)
+    with Session(engine) as db:
+        set_identity(db,local['user'])
+        trace_row=db.scalar(select(ManagementTrace).where(ManagementTrace.run_id==rid,ManagementTrace.kind=='model_answer_failed'))
+        assert trace_row.detail=={'stage':'classification','error_type':'MODEL_QUOTA_EXHAUSTED','http_status':402}
+    from intent_platform.trace_api import _trace_entry, display_entry
+    displayed=display_entry(_trace_entry(trace_row),{})
+    assert displayed['title']=='模型回答未完成'
+    display_values={item['label']:item['value'] for item in displayed['display']}
+    assert {key:display_values[key] for key in ('处理阶段','错误类别','HTTP状态码')} == {
+        '处理阶段':'意图分类','错误类别':'模型额度不足','HTTP状态码':402}
+    history=client.get(f'/api/v2/runtime/conversations/{cid}/history',headers=h)
+    assert history.status_code==200 and 'MODEL_QUOTA_EXHAUSTED' not in history.text
+
+
+def test_unclassified_model_answer_failure_does_not_persist_exception_text(client, local, zhiyu, monkeypatch):
+    from intent_platform import model_answer
+    work,g,h,cid,rid=protocol_run(client,zhiyu)
+    work['snapshot']=deepcopy(work['snapshot']);work['snapshot']['model_profile']['mode']='openai'
+    secret='Bearer sk-sensitive-error-text-that-must-not-persist'
+    monkeypatch.setattr(model_answer,'classify',lambda *_: (_ for _ in ()).throw(ValueError(secret)))
+    assert model_answer.maybe_answer(work)
+    with Session(engine) as db:
+        set_identity(db,g['user_id'])
+        event_rows=list(db.scalars(select(Event).where(Event.run_id==rid)))
+        assert secret not in json.dumps([row.payload for row in event_rows],ensure_ascii=False)
+        assert db.scalar(select(func.count()).select_from(Call).where(Call.run_id==rid))==0
+    with Session(engine) as db:
+        set_identity(db,local['user'])
+        trace_row=db.scalar(select(ManagementTrace).where(ManagementTrace.run_id==rid,ManagementTrace.kind=='model_answer_failed'))
+        assert trace_row.detail=={'stage':'classification','error_type':'MODEL_PROCESSING_ERROR'}
+        assert secret not in json.dumps(trace_row.detail,ensure_ascii=False)
+
+
+@pytest.mark.parametrize(('message','expected'),[
+    ('MODEL_AUTH_REJECTED (HTTP 401)',('MODEL_AUTH_REJECTED',401)),
+    ('MODEL_QUOTA_EXHAUSTED (HTTP 402)',('MODEL_QUOTA_EXHAUSTED',402)),
+    ('MODEL_ACCESS_FORBIDDEN (HTTP 403)',('MODEL_ACCESS_FORBIDDEN',403)),
+    ('MODEL_RATE_LIMITED (HTTP 429)',('MODEL_RATE_LIMITED',429)),
+    ('MODEL_REMOTE_FAILURE (HTTP 503)',('MODEL_REMOTE_FAILURE',503)),
+    ('MODEL_REQUEST_REJECTED (HTTP 400)',('MODEL_REQUEST_REJECTED',400)),
+    ('MODEL_TIMEOUT',('MODEL_TIMEOUT',None)),
+    ('MODEL_NETWORK_ERROR',('MODEL_NETWORK_ERROR',None)),
+    ('MODEL_INVALID_RESPONSE',('MODEL_INVALID_RESPONSE',None)),
+    ('Model credential is unavailable',('MODEL_CONFIGURATION_UNAVAILABLE',None)),
+    ('Unreviewed synthetic catalog',('MODEL_SYNTHETIC_CATALOG_REJECTED',None)),
+    ('Bearer sk-sensitive-error-text',('MODEL_PROCESSING_ERROR',None)),
+])
+def test_model_answer_failure_classifier_is_bounded(message, expected):
+    from intent_platform.model_answer import classify_model_failure
+    assert classify_model_failure(ValueError(message))==expected
+
+
+def test_model_answer_classifies_missing_catalog_without_persisting_path():
+    from intent_platform.model_answer import classify_model_failure
+    assert classify_model_failure(FileNotFoundError('private local path'))==('MODEL_SYNTHETIC_CATALOG_UNAVAILABLE',None)
 
 
 def test_late_failed_model_attempt_does_not_fail_current_attempt(client, local, zhiyu, monkeypatch):

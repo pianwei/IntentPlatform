@@ -8,6 +8,10 @@ Published applications may expose `synthetic_catalog` metadata with the fixed pe
 
 `MODEL_ANSWER` is a durable decision without an ExecutionPlan or Call. Final RESULT adds `answer_source: business | model | practice | mixed` and `practice_active`; conversation reads also expose `practice_active`. Private business facts and specific policy questions still require capabilities. Failed, unauthorized or unknown business calls never become model-only success. Internal roleplay facts and session-control fields are excluded by backend projection. Conversation practice state and catalog state are space-isolated; migrations 0015/0016 preserve old snapshots.
 
+Model-only failures remain generic in user events. The workspace-admin run trace records only a fixed failure stage/category and, for recognized upstream HTTP errors, the numeric status code; it never stores exception text, prompts, response bodies, endpoints or credentials. Historical failures created before this diagnostic was added cannot be retrospectively classified.
+
+The six reviewed Zhiyu composite Skill Markdown files are runtime package resources and must ship in the backend distribution. The public-model synthetic allowlist runs before the external model request; a missing package resource fails closed and is recorded as `MODEL_SYNTHETIC_CATALOG_UNAVAILABLE`, never bypassed.
+
 ## INT-023 display and creation compatibility
 
 `GET /me` and account reads default missing `text_size` to `standard`. `PATCH /me` and account updates merge only explicitly supplied preference fields with stored JSON; changing density must not reset font size, and vice versa. No schema migration is required for these JSON fields.
