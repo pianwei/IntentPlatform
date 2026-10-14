@@ -93,7 +93,10 @@ def test_public_zhiyu_model_allowlist_keeps_old_response_shapes_and_rejects_poli
     assert_synthetic_snapshot(legacy)
 
     tampered = deepcopy(legacy)
-    tampered["capabilities"][0]["definition"]["presentation"]["response_mode"] = "summary"
+    policy = tampered["capabilities"][0]["definition"].setdefault("business_authorization", {})
+    policy["mode"] = "none" if policy.get("mode") == "function" else "function"
+    policy["user_id_header"] = None
+    policy["workspace_id_header"] = None
     import pytest
     with pytest.raises(ValueError, match="unchanged approved synthetic definitions"):
         assert_synthetic_snapshot(tampered)

@@ -116,6 +116,10 @@ def normalize_draft(db, ws, raw):
     if d.get("authoring_version") != "function-v2":
         return d
     d["compiler_version"] = "finite-json-v2"
+    # Business-object authorization belongs to the function contract. Keep
+    # old published definitions (which have no field) on their pinned legacy
+    # behavior, but make every new function's choice explicit.
+    d.setdefault("business_authorization", {"mode": "function"})
     if d["connector"]["kind"] == "http":
         d["connector"]["version"] = "2"
     # Resolve author-selected concepts to current published packages. Existing

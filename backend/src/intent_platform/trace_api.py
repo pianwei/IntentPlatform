@@ -25,7 +25,7 @@ LAYERS = ("entity", "dynamics", "planning", "execution")
 DETAIL_KEYS = {
     "entity": {"goal", "fields", "kind", "count", "candidate_count", "object_types", "bound_object_type", "binding_source", "input_fields", "source", "entities", "actions", "negated", "step", "bindings"},
     "dynamics": {"step", "name", "count", "candidate_count", "effect", "actions", "status", "validation", "capability_ids", "semantic", "parameters", "preconditions", "entity_binding", "error_type"},
-    "planning": {"stage", "reason_code", "error_type", "http_status", "schema_paths", "source", "skill_version_id", "steps", "step", "validation", "status"},
+    "planning": {"stage", "reason_code", "error_type", "http_status", "schema_paths", "source", "skill_version_id", "capability_key", "catalog_diff_fields", "steps", "step", "validation", "status"},
     "execution": {"step", "status", "call_count", "error_stage"},
 }
 

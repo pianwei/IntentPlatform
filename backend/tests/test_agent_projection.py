@@ -3,6 +3,7 @@
 Model responses here are explicit protocol fixtures, never model-quality evidence.
 """
 import uuid
+import json
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -201,8 +202,14 @@ def test_composite_pins_one_layer_and_never_exposes_implicit_tools(client, three
     cid, rid = start(client, headers, app["id"], "查询 C001")
     assert drive(client, headers, rid)["status"] == "SUCCEEDED"
     rows = client.get(f"/api/v2/runtime/conversations/{cid}/events", headers=headers).json()
-    answer = next(e["payload"]["data"] for e in rows if e["event_type"] == "RESULT")
-    assert "余额" in answer and "12000.0" in answer and "customers" not in answer
+    result = next(e["payload"] for e in rows if e["event_type"] == "RESULT")
+    component_json = json.dumps(result.get("components", []), ensure_ascii=False)
+    # A published structured/table response keeps its facts in the single
+    # result component; the answer text is only a short lead-in, not a second
+    # serialized copy of the same business data.
+    assert result["data"] == "查询完成，共找到 2 条记录，结果如下。"
+    assert len(result["components"]) == 1 and result["components"][0]["component"] == "table"
+    assert "余额" in component_json and "12000.0" in component_json and "customers" not in component_json
 
 
 def test_current_permission_filters_entity_model_input(client, three_app, monkeypatch):

@@ -36,18 +36,42 @@ def test_optional_filter_when_provided_is_bound_and_revalidated(monkeypatch):
     definition, run, release, request, calls = setup_binding(monkeypatch)
     request["participants"].append({"role": "customer", "type": "zhiyu:Customer", "mention": "星澜科技"})
     facts, question = cb.bind_arguments(None, run, "0", request, {"definition": definition}, release)
-    assert question is None and facts["entity.customer.authorized"] is True
+    assert question is None and facts["entity.customer.bound"] is True
     assert request["arguments"] == {"customer_id": "ZY-C001"} and len(calls) == 1
     cb.revalidate_call_bindings(None, run, SimpleNamespace(definition=definition, arguments=request["arguments"], bindings=run.bindings), release)
     assert len(calls) == 2
 
 
-def test_optional_filter_cannot_read_unauthorized_object(monkeypatch):
+def test_legacy_optional_filter_still_uses_legacy_object_authorization(monkeypatch):
     definition, run, release, request, calls = setup_binding(monkeypatch)
+    definition.pop("business_authorization")
     request["participants"].append({"role": "customer", "type": "zhiyu:Customer", "mention": "ZY-C002"})
-    with pytest.raises(cb.BindingDenied, match="No authorized"):
+    with pytest.raises(cb.BindingDenied, match="No entity matches"):
         cb.bind_arguments(None, run, "0", request, {"definition": definition}, release)
     assert len(calls) == 1 and request["arguments"] == {}
+
+
+def test_explicit_function_policy_binds_cross_owner_entity_and_defers_authorization(monkeypatch):
+    definition, run, release, request, calls = setup_binding(monkeypatch)
+    definition["business_authorization"] = {"mode": "function", "user_id_header": "X-Actor"}
+
+    def resolve(reference, pinned, workspace, user, query, selected_id=None, **kwargs):
+        calls.append((query, selected_id, kwargs.get("authorization_mode")))
+        return [{"id": "ZY-C002", "label": "海岚供应链", "type": "zhiyu:Customer", "authorized": False}]
+
+    monkeypatch.setattr(cb, "resolve", resolve)
+    request["participants"].append({"role": "customer", "type": "zhiyu:Customer", "mention": "ZY-C002"})
+
+    facts, question = cb.bind_arguments(None, run, "0", request, {"definition": definition}, release)
+
+    assert question is None
+    assert request["arguments"] == {"customer_id": "ZY-C002"}
+    assert facts["entity.customer.bound"] is True
+    assert facts["entity.customer.authorization_delegated"] is True
+    assert calls == [("ZY-C002", None, "function")]
+    call = SimpleNamespace(definition=definition, arguments=request["arguments"], bindings=run.bindings)
+    cb.revalidate_call_bindings(None, run, call, release)
+    assert calls[-1] == ("ZY-C002", "ZY-C002", "function")
 
 
 @pytest.mark.parametrize("value", [None, "", "ZY-C001"])
@@ -69,6 +93,18 @@ def test_empty_mention_and_saved_binding_do_not_bypass_resolution(monkeypatch):
         cb.bind_arguments(None, run, "0", request, {"definition": definition}, release)
 
 
+def test_answer_to_entity_mention_is_saved_before_revalidation(monkeypatch):
+    definition, run, release, request, calls = setup_binding(monkeypatch)
+    request["participants"].append({"role": "customer", "type": "zhiyu:Customer", "mention": ""})
+    _, question = cb.bind_arguments(None, run, "0", request, {"definition": definition}, release)
+    run.question = question
+
+    cb.apply_binding_answer(run, SimpleNamespace(values={"mention": "ZY-C002"}, option_id=None))
+
+    assert run.bindings[question["binding_key"]]["query"] == "ZY-C002"
+    assert run.bindings[question["binding_key"]]["state"] == "selected"
+
+
 def test_required_role_is_not_relaxed_when_parameter_is_missing(monkeypatch):
     definition, run, release, request, calls = setup_binding(monkeypatch)
     definition = deepcopy(definition)
@@ -80,10 +116,11 @@ def test_required_role_is_not_relaxed_when_parameter_is_missing(monkeypatch):
 
 def test_dispatch_rejects_unbound_optional_filter_and_revoked_access(monkeypatch):
     definition, run, release, request, calls = setup_binding(monkeypatch)
+    definition.pop("business_authorization")  # historical definitions keep their original platform resolver policy
     with pytest.raises(cb.BindingDenied, match="unique trusted binding"):
         cb.revalidate_call_bindings(None, run, SimpleNamespace(definition=definition, arguments={"customer_id": "ZY-C001"}, bindings={}), release)
     request["participants"].append({"role": "customer", "type": "zhiyu:Customer", "mention": "星澜科技"})
     cb.bind_arguments(None, run, "0", request, {"definition": definition}, release)
     monkeypatch.setattr(cb, "resolve", lambda *a, **kw: [])
-    with pytest.raises(cb.BindingDenied, match="authorization changed"):
+    with pytest.raises(cb.BindingDenied, match="Entity binding changed"):
         cb.revalidate_call_bindings(None, run, SimpleNamespace(definition=definition, arguments=request["arguments"], bindings=run.bindings), release)

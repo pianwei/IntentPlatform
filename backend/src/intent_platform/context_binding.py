@@ -39,13 +39,25 @@ def source_rows(db, run, reference, expected, resolver_ref):
     return result
 
 
-def authorized_history(db, run, reference, expected, resolver_ref, profile, *, max_checks=40):
+def _business_authorization_mode(definition):
+    config = definition.get("business_authorization")
+    return config.get("mode") if isinstance(config, dict) else None
+
+
+def authorized_history(db, run, reference, expected, resolver_ref, profile, *, max_checks=40,
+                       authorization_mode=None):
     result = []
     rows = source_rows(db, run, reference, expected, resolver_ref)
+    if authorization_mode is None:
+        source_call = db.get(Call, reference["call_id"])
+        authorization_mode = _business_authorization_mode(source_call.definition) if source_call else None
+    resolver_mode = authorization_mode
     if len(rows) > max_checks:
         raise BindingDenied("Reference an explicit row in collections exceeding the finite authorization budget")
     for row in rows:
-        matches = resolve(resolver_ref, profile, run.workspace_id, run.user_id, row["label"], selected_id=row["id"], **resolver_kwargs(db, run, profile))
+        matches = resolve(resolver_ref, profile, run.workspace_id, run.user_id, row["label"],
+                          selected_id=row["id"], authorization_mode=resolver_mode,
+                          **resolver_kwargs(db, run, profile))
         if matches:
             result.append({**row, "label": matches[0]["label"]})
     return result
@@ -87,6 +99,8 @@ def history_context(db, run, release, stats=None):
 
 def bind_arguments(db, run, request_index, request, capability, release):
     definition = capability["definition"]
+    auth_mode = _business_authorization_mode(definition)
+    resolver_mode = auth_mode
     records = copy.deepcopy(run.bindings or {})
     facts = {"identity.authenticated": True}
     roles = {r["role"]: r for r in definition.get("participant_roles", [])}
@@ -110,21 +124,25 @@ def bind_arguments(db, run, request_index, request, capability, release):
         reference = saved.get("history_ref") or participant.get("history_ref")
         query = saved.get("query") or participant.get("mention")
         record = {**saved, "parameter": parameter, "role": role, "resolver_ref": resolver_ref,
+                  "authorization_mode": auth_mode,
                   "request_index": request_index, "source": "history" if reference else "resolver"}
         if reference:
-            choices = authorized_history(db, run, reference, profile["entity_type"], resolver_ref, profile)
+            choices = authorized_history(db, run, reference, profile["entity_type"], resolver_ref, profile,
+                                        authorization_mode=resolver_mode)
         elif query:
-            choices = resolve(resolver_ref, profile, run.workspace_id, run.user_id, query, saved.get("selected_id"), **resolver_kwargs(db, run, profile))
+            choices = resolve(resolver_ref, profile, run.workspace_id, run.user_id, query,
+                              saved.get("selected_id"), authorization_mode=resolver_mode,
+                              **resolver_kwargs(db, run, profile))
         else:
             record["state"] = "mention"
             records[key] = record; run.bindings = records
             return facts, {"kind": "entity_mention", "binding_key": key, "request_index": request_index,
                            "fields": [{"name": "mention", "type": "string", "required": True, "label": role + "（名称或描述）"}], "options": []}
         if not choices:
-            raise BindingDenied("No authorized entity matches the current binding")
+            raise BindingDenied("No entity matches the current function binding")
         if len(choices) > 1:
             if len({candidate["label"] for candidate in choices}) != len(choices):
-                raise BindingDenied("Resolver must provide distinguishable masked labels for authorized candidates")
+                raise BindingDenied("Resolver must provide distinguishable labels for selectable candidates")
             options = {uid("choice"): candidate for candidate in choices}
             record.update({"state": "choice", "options": options, "query": query, "history_ref": reference})
             records[key] = record; run.bindings = records
@@ -132,13 +150,18 @@ def bind_arguments(db, run, request_index, request, capability, release):
                            "fields": [], "options": [{"id": option_id, "label": candidate["label"]} for option_id, candidate in options.items()]}
         selected = choices[0]
         record.update({"state": "resolved", "value": selected["id"], "selected_id": selected["id"], "query": selected["label"] if reference else query,
+                       "authorization_mode": auth_mode,
                        "history_ref": selected.get("history_ref"), "source_version": selected.get("source_version")})
         record.pop("options", None)
         records[key] = record
         request["arguments"][parameter] = selected["id"]
-        facts["entity." + role + ".authorized"] = True
+        facts["entity." + role + ".bound"] = True
+        if auth_mode is None:
+            facts["entity." + role + ".authorized"] = True
+        elif auth_mode == "function":
+            facts["entity." + role + ".authorization_delegated"] = True
         if reference:
-            facts["history." + role + ".authorized"] = True
+            facts["history." + role + ".bound"] = True
     run.bindings = records
     return facts, None
 
@@ -153,7 +176,7 @@ def apply_binding_answer(run, body):
         record["query"] = body.values["mention"].strip()
     else:
         if body.values or body.option_id not in record.get("options", {}):
-            raise ValueError("Select one current authorized entity option")
+            raise ValueError("Select one current entity option")
         selected = record["options"][body.option_id]
         record["selected_id"] = selected["id"]
         if selected.get("history_ref"):
@@ -187,9 +210,12 @@ def authorize_question(db, run, question_id):
     with resolver_budget(calls=40, seconds=20):
         for candidate in record["candidates"]:
             if candidate.get("history_ref"):
-                rows = authorized_history(db, run, candidate["history_ref"], profile["entity_type"], reference, profile, max_checks=1)
+                rows = authorized_history(db, run, candidate["history_ref"], profile["entity_type"], reference, profile, max_checks=1,
+                                          authorization_mode=record.get("authorization_mode"))
             else:
-                rows = resolve(reference, profile, run.workspace_id, run.user_id, candidate["label"], candidate["id"], **resolver_kwargs(db, run, profile))
+                rows = resolve(reference, profile, run.workspace_id, run.user_id, candidate["label"], candidate["id"],
+                               authorization_mode=record.get("authorization_mode"),
+                               **resolver_kwargs(db, run, profile))
             if len(rows) != 1 or rows[0]["id"] != candidate["id"] or rows[0]["label"] != candidate["label"]:
                 raise BindingDenied("Question candidate access changed")
     cache.add(key)
@@ -204,15 +230,23 @@ def revalidate_binding_evidence(db, run, bindings, arguments, release):
         profile = release.snapshot.get("resolver_profiles", {}).get(record["resolver_ref"])
         if not profile or arguments.get(record["parameter"]) != record["value"]:
             raise BindingDenied("Persisted binding is unavailable")
+        authorization_mode = record.get("authorization_mode")
+        resolver_mode = authorization_mode
         if record.get("history_ref"):
-            rows = authorized_history(db, run, record["history_ref"], profile["entity_type"], record["resolver_ref"], profile)
+            rows = authorized_history(db, run, record["history_ref"], profile["entity_type"], record["resolver_ref"], profile,
+                                      authorization_mode=resolver_mode)
             if len(rows) != 1 or rows[0]["id"] != record["value"]:
-                raise BindingDenied("Historical source authorization changed")
-        elif len(resolve(record["resolver_ref"], profile, run.workspace_id, run.user_id, record["query"], record["value"], **resolver_kwargs(db, run, profile))) != 1:
-            raise BindingDenied("Entity authorization changed before dispatch")
-        facts["entity." + record["role"] + ".authorized"] = True
+                raise BindingDenied("Historical source binding changed")
+        elif len(resolve(record["resolver_ref"], profile, run.workspace_id, run.user_id, record["query"], record["value"],
+                         authorization_mode=resolver_mode, **resolver_kwargs(db, run, profile))) != 1:
+            raise BindingDenied("Entity binding changed before dispatch")
+        facts["entity." + record["role"] + ".bound"] = True
+        if authorization_mode is None:
+            facts["entity." + record["role"] + ".authorized"] = True
+        elif authorization_mode == "function":
+            facts["entity." + record["role"] + ".authorization_delegated"] = True
         if record.get("history_ref"):
-            facts["history." + record["role"] + ".authorized"] = True
+            facts["history." + record["role"] + ".bound"] = True
     return facts
 
 

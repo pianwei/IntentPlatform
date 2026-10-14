@@ -17,6 +17,7 @@ __pycache__/
 output/
 方案/*.docx
 backend/build/
+backend/evaluation_data/local/
 *.egg-info/
 *.log
 frontend/playwright-report/

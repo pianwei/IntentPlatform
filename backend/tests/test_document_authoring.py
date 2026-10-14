@@ -311,6 +311,9 @@ def test_markdown_fallback_uses_approved_labels_not_json():
 def test_document_upgrade_runs_model_plan_persists_mapping_and_preserves_old_release(client, local, zhiyu, monkeypatch):
     from intent_platform.zhiyu.skills import business_skill_templates
     from intent_platform.planning import _skill_spec
+    with Session(engine) as db:
+        set_identity(db, local['user'])
+        original_release = deepcopy(db.get(Release, zhiyu['current_release_id']).snapshot)
     invoked = []
     def model(work, stage, data, instruction):
         assert stage == 'plan' and data['skill_document'] and data['final_output_schema']
@@ -324,8 +327,12 @@ def test_document_upgrade_runs_model_plan_persists_mapping_and_preserves_old_rel
         plan['final_output_mapping'] = {field: {'$step': field, 'path': 'data'} for field in fields}
         return {'decision': 'PLAN', 'plan': plan}
     monkeypatch.setattr('intent_platform.three_layer._invoke', model)
-    upgrade = path(local, '/synthetic/zhiyu/document-skills')
-    result = client.post(upgrade, headers=local['headers'], json={})
+    # Exercise the resumable public catalog-install path as well as the
+    # focused document-skills endpoint. A retry through this route reinstalls
+    # the direct catalog before resuming confirmed composite tests.
+    upgrade = path(local, '/synthetic/zhiyu/install')
+    upgrade_body = {'document_skills': True}
+    result = client.post(upgrade, headers=local['headers'], json=upgrade_body)
     assert result.status_code == 409, result.text
     detail = result.json()['detail']; assert detail['execution_test']['status'] == 'WAITING_CONFIRMATION', result.text
     preview = detail['execution_test']['confirmation']
@@ -334,14 +341,38 @@ def test_document_upgrade_runs_model_plan_persists_mapping_and_preserves_old_rel
         'run_id': preview['run_id'], 'revision': preview['revision'], 'confirmed': True}).status_code == 200
     for _ in range(20): tick()
     assert client.get(test_path, headers=local['headers']).json()['passed']
-    result = client.post(upgrade, headers=local['headers'], json={})
+    result = client.post(upgrade, headers=local['headers'], json=upgrade_body)
     assert result.status_code == 200, result.text
     app = result.json()['agent']; assert app['current_release_id'] != zhiyu['current_release_id']
+    # Saving an approved output example changes only authoring metadata; it
+    # must not make the runtime snapshot appear outdated and re-run the
+    # confirmed marketing write during an idempotent catalog-install retry.
+    marketing = next(row for row in result.json()['composites'] if row['name'] == '营销任务创建')
+    test_path = path(local, '/functions/' + marketing['function_id'] + '/execution-test')
+    with Session(engine) as db:
+        set_identity(db, local['user'])
+        marketing_revision = db.get(Function, marketing['function_id']).revision
+    saved_example = client.post(test_path.rsplit('/execution-test', 1)[0] + '/output-examples',
+        headers=local['headers'], json={'revision': marketing_revision})
+    assert saved_example.status_code == 200, saved_example.text
+    marketing_presentation = deepcopy(saved_example.json()['definition']['presentation'])
+    release_id = app['current_release_id']
+    with Session(engine) as db:
+        set_identity(db, local['user'])
+        marketing_version = db.get(Function, marketing['function_id']).latest_version
+    retried = client.post(upgrade, headers=local['headers'], json=upgrade_body)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()['agent']['current_release_id'] == release_id
+    with Session(engine) as db:
+        set_identity(db, local['user'])
+        retried_marketing = db.get(Function, marketing['function_id'])
+        assert retried_marketing.latest_version == marketing_version
+        assert retried_marketing.definition['presentation'] == marketing_presentation
     with Session(engine) as db:
         set_identity(db, local['user'])
         old = db.get(Release, zhiyu['current_release_id']); new = db.get(Release, app['current_release_id'])
-        assert old.snapshot['three_layer_prompt_revision'] == 'scope-v9'
-        assert new.snapshot['three_layer_prompt_revision'] == 'scope-v10'
+        assert old.snapshot == original_release
+        assert new.snapshot['three_layer_prompt_revision'] == 'scope-v11'
         from intent_platform.public_demo import assert_synthetic_snapshot
         assert_synthetic_snapshot(old.snapshot); assert_synthetic_snapshot(new.snapshot)
         for row in result.json()['composites']:

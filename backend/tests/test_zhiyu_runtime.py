@@ -33,6 +33,9 @@ def test_install_idempotent_release_and_restricted_public_catalog(client, local,
     with Session(engine) as db:
         set_identity(db, local['user'])
         snapshot = db.get(Release, zhiyu['current_release_id']).snapshot
+        assert snapshot['three_layer_prompt_revision'] == 'scope-v11'
+        assert all(capability['definition'].get('business_authorization', {}).get('mode') in {'function', 'none'}
+                   for capability in snapshot['capabilities'])
         from intent_platform.public_demo import assert_synthetic_snapshot
         assert_synthetic_snapshot(snapshot)
         legacy = deepcopy(snapshot)
@@ -45,6 +48,22 @@ def test_install_idempotent_release_and_restricted_public_catalog(client, local,
         assert_synthetic_snapshot(legacy)
         tampered = deepcopy(snapshot); tampered['capabilities'][0]['definition']['description'] += ' arbitrary'
         with pytest.raises(ValueError): assert_synthetic_snapshot(tampered)
+
+
+def test_explicit_function_policy_bypasses_platform_object_prefilter_but_legacy_keeps_it(client, local, zhiyu):
+    with Session(engine) as db:
+        set_identity(db, local["user"])
+        snapshot = db.get(Release, zhiyu["current_release_id"]).snapshot
+    reference, profile = next((ref, value) for ref, value in snapshot["resolver_profiles"].items()
+                              if value["entity_type"] == "zhiyu:Customer")
+    from intent_platform.resolvers import resolve
+
+    legacy = resolve(reference, profile, local["ws"], local["user"], "海岚供应链", persona_id="manager_a")
+    delegated = resolve(reference, profile, local["ws"], local["user"], "海岚供应链",
+                        persona_id="manager_a", authorization_mode="function")
+
+    assert legacy == []
+    assert [item["id"] for item in delegated] == ["ZY-C002"]
 
 
 def test_zhiyu_skill_documents_are_loadable_from_distribution():
@@ -223,7 +242,7 @@ def test_late_failed_model_attempt_does_not_fail_current_attempt(client, local, 
 
 
 @pytest.mark.parametrize('persona,key', [('manager_a','performance.ranking'),('supervisor','performance.summary')])
-def test_role_only_restriction_denies_before_call_registration(client, local, zhiyu, monkeypatch, persona, key):
+def test_role_only_restriction_is_enforced_by_selected_function(client, local, zhiyu, monkeypatch, persona, key):
     from intent_platform import three_layer
     from intent_platform.worker import prepare_run
     work,g,h,cid,rid=protocol_run(client,zhiyu,persona=persona,text='查看2026-09业绩')
@@ -235,7 +254,9 @@ def test_role_only_restriction_denies_before_call_registration(client, local, zh
     with Session(engine) as db:
         set_identity(db,g['user_id'])
         assert db.get(Run,rid).status=='FAILED'
-        assert db.scalar(select(func.count()).select_from(Call).where(Call.run_id==rid))==0
+        calls = db.scalars(select(Call).where(Call.run_id==rid)).all()
+        assert len(calls) == 1 and calls[0].status in {'FAILED', 'DENIED'}
+        assert calls[0].result['data'] == {}
 
 
 def test_persona_switch_starts_without_practice_context(client, local, zhiyu):

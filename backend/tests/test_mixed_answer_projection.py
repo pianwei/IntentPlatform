@@ -18,7 +18,8 @@ def completed_business(monkeypatch):
         "presentation": {"component": "detail", "title": "订单汇总",
                          "field_map": {"数量": "count", "来源": "source"}},
     }
-    step = SimpleNamespace(step_key="internal-step", status="SUCCEEDED", definition=definition,
+    step = SimpleNamespace(step_key="internal-step", capability_id="function-business-summary",
+                           status="SUCCEEDED", definition=definition,
                            spec={}, result={"data": {"count": 7, "source": "已批准的模拟订单资料",
                                                      "secret": "must-never-be-shown"}})
 
@@ -34,7 +35,9 @@ def completed_business(monkeypatch):
     monkeypatch.setattr(services, "authorize_run_capabilities", lambda *_: None)
     work = {"id": "internal-run", "user_id": "test-user", "workspace_id": "test-workspace",
             "text": "查询订单数量，并解释应收账款是什么意思",
-            "snapshot": {"model_profile": {"mode": "openai"}, "three_layer_prompt_revision": "scope-v9"}}
+            "snapshot": {"model_profile": {"mode": "openai"}, "three_layer_prompt_revision": "scope-v9",
+                         "capabilities": [{"capability_id": "function-business-summary",
+                                           "definition": definition}]}}
     plan = SimpleNamespace(id="internal-plan", skill_version_id=None, snapshot={
         "steps": [{"step_id": "internal-step", "arguments": {}}], "result_steps": ["internal-step"],
         "three_layer": {"goal": {"goal": work["text"]}}, "general_question": "应收账款是什么意思"})

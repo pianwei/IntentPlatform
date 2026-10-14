@@ -90,7 +90,8 @@ def wire_request(definition, arguments):
 
 
 def execute_http_v2(definition, arguments, call_id, user_id, workspace_id, reconcile_operation=None, before_send=None):
-    from .ports import connector_checks, target_authorized, credential, at, condition
+    from .ports import (connector_checks, target_authorized, credential, at, condition,
+                        legacy_object_authorization, configured_identity_headers)
     c = definition["connector"]; connector_checks(definition, workspace_id)
     url, query, headers, body = wire_request(definition, arguments)
     if reconcile_operation:
@@ -103,11 +104,8 @@ def execute_http_v2(definition, arguments, call_id, user_id, workspace_id, recon
         if not c.get("authorization_header"): raise ValueError("Explicit server credential header required")
         headers[c["authorization_header"]] = c.get("authorization_prefix", "") + secret
     if c.get("idempotency_header") and not reconcile_operation: headers[c["idempotency_header"]] = call_id
-    cfg = settings()
-    if cfg.object_authorization_url:
-        decision = request_json("POST", cfg.object_authorization_url, payload={"user_id": user_id, "workspace_id": workspace_id, "endpoint": url, "action": definition["action"], "object_type": definition["object_type"], "arguments": arguments}, headers={"Authorization": "Bearer " + cfg.object_authorization_key} if cfg.object_authorization_key else {}, timeout=10)
-        if decision.get("allowed") is not True: raise PermissionError("Business object authorization denied")
-    elif cfg.env == "production": raise PermissionError("Production object authorization is unavailable")
+    legacy_object_authorization({**definition, "arguments": arguments}, user_id, workspace_id, url)
+    headers.update(configured_identity_headers(definition, user_id, workspace_id))
     if before_send: before_send()
     try:
         empty_allowed = (definition.get("output_mode") == "none" and not definition.get("success_condition")

@@ -64,6 +64,39 @@ def credential(ref, workspace_id, connector):
     return entry["value"]
 
 
+def legacy_object_authorization(definition, user_id, workspace_id, endpoint):
+    """Keep the global ACL adapter only for old immutable definitions.
+
+    New definitions carry an explicit business_authorization field and route
+    object-level decisions to the configured function/endpoint itself.
+    """
+    if definition.get("business_authorization") is not None:
+        return
+    cfg = settings()
+    if cfg.object_authorization_url:
+        decision = request_json("POST", cfg.object_authorization_url,
+            payload={"user_id": user_id, "workspace_id": workspace_id, "endpoint": endpoint,
+                     "action": definition["action"], "object_type": definition["object_type"],
+                     "arguments": definition.get("arguments", {})},
+            headers={"Authorization": "Bearer " + cfg.object_authorization_key} if cfg.object_authorization_key else {}, timeout=10)
+        if decision.get("allowed") is not True:
+            raise PermissionError("Business object authorization denied")
+    elif cfg.env == "production":
+        raise PermissionError("Legacy business object authorization is not configured")
+
+
+def configured_identity_headers(definition, user_id, workspace_id):
+    config = definition.get("business_authorization")
+    if not config or config.get("mode") != "function":
+        return {}
+    result = {}
+    if config.get("user_id_header"):
+        result[config["user_id_header"]] = user_id
+    if config.get("workspace_id_header"):
+        result[config["workspace_id_header"]] = workspace_id
+    return result
+
+
 def connector_checks(definition, workspace_id):
     c = definition["connector"]
     from .http_v2 import validate_server_headers
@@ -100,16 +133,7 @@ def _execute_connector_v1(definition, arguments, call_id, user_id, workspace_id,
         if before_send:
             before_send()
         return {"status": "SUCCEEDED", "data": {"fixture": True, "notice": "开发模拟结果，不是银行业务数据", **arguments}, "operation_id": call_id, "fixture_mode": True}
-    cfg = settings()
-    if cfg.object_authorization_url:
-        decision = request_json("POST", cfg.object_authorization_url,
-                                payload={"user_id": user_id, "workspace_id": workspace_id, "endpoint": c["endpoint"],
-                                         "action": definition["action"], "object_type": definition["object_type"], "arguments": arguments},
-                                headers={"Authorization": "Bearer " + cfg.object_authorization_key} if cfg.object_authorization_key else {}, timeout=10)
-        if decision.get("allowed") is not True:
-            raise PermissionError("Business object/data authorization denied")
-    elif cfg.env == "production":
-        raise PermissionError("Production object/data authorization is not configured")
+    legacy_object_authorization({**definition, "arguments": arguments}, user_id, workspace_id, c["endpoint"])
     headers = {}
     key = credential(c.get("credential_ref"), workspace_id, c)
     if key:
@@ -121,6 +145,7 @@ def _execute_connector_v1(definition, arguments, call_id, user_id, workspace_id,
             raise ValueError("Credential supplied without an explicit authorization header")
     if c.get("idempotency_header"):
         headers[c["idempotency_header"]] = call_id
+    headers.update(configured_identity_headers(definition, user_id, workspace_id))
     if reconcile_operation:
         if not c.get("status_endpoint"):
             return {"status": "UNKNOWN", "data": {}, "operation_id": reconcile_operation, "fixture_mode": False}
@@ -241,6 +266,8 @@ def _execute_fixture_v3(definition, arguments, call_id, user_id, workspace_id, r
     key = definition["connector"].get("workflow_id")
     if key not in {p["key"] for p in function_packages()}:
         raise ValueError("Unknown synthetic operation")
+    business_authorization = definition.get("business_authorization")
+    authorization_mode = business_authorization.get("mode") if isinstance(business_authorization, dict) else "function"
     with Session(engine) as db:
         set_identity(db, user_id)
         call = db.get(Call, call_id)
@@ -259,7 +286,13 @@ def _execute_fixture_v3(definition, arguments, call_id, user_id, workspace_id, r
             persona = "manager_a"
             private = False; private_id = None
         state = state_for_run(db, run) if call else db.get(SyntheticState, (workspace_id, CATALOG_ID)).state
-        authorize_operation(key, arguments, state, persona)
+        if authorization_mode == "function":
+            authorize_operation(key, arguments, state, persona)
+        elif authorization_mode == "none":
+            from .zhiyu.engine import _check_catalog_state
+            _check_catalog_state(state)
+        else:
+            raise ValueError("Pinned function business authorization mode is unavailable")
     if before_send: before_send()
     with Session(engine) as db, db.begin():
         set_identity(db, user_id)
@@ -267,17 +300,25 @@ def _execute_fixture_v3(definition, arguments, call_id, user_id, workspace_id, r
         if private:
             conv = db.scalar(select(Conversation).where(Conversation.id == private_id).with_for_update())
             state = conv.business_context["authoring_synthetic_state"]
-            authorize_operation(key, arguments, state, persona)
+            if authorization_mode == "function":
+                authorize_operation(key, arguments, state, persona)
+            else:
+                from .zhiyu.engine import _check_catalog_state
+                _check_catalog_state(state)
             if reconcile_operation:
-                return reconcile(reconcile_operation, state, persona_id=persona)
-            result, changed = execute(key, arguments, state, call_id, persona_id=persona)
+                return reconcile(reconcile_operation, state, persona_id=persona, authorization_mode=authorization_mode)
+            result, changed = execute(key, arguments, state, call_id, persona_id=persona, authorization_mode=authorization_mode)
             conv.business_context = {**conv.business_context, "authoring_synthetic_state": changed}
             return result
         state = db.scalar(select(SyntheticState).where(SyntheticState.workspace_id == workspace_id,
                           SyntheticState.catalog_id == CATALOG_ID).with_for_update())
-        authorize_operation(key, arguments, state.state, persona)
-        if reconcile_operation: return reconcile(reconcile_operation, state.state, persona_id=persona)
-        result, changed = execute(key, arguments, state.state, call_id, persona_id=persona)
+        if authorization_mode == "function":
+            authorize_operation(key, arguments, state.state, persona)
+        else:
+            from .zhiyu.engine import _check_catalog_state
+            _check_catalog_state(state.state)
+        if reconcile_operation: return reconcile(reconcile_operation, state.state, persona_id=persona, authorization_mode=authorization_mode)
+        result, changed = execute(key, arguments, state.state, call_id, persona_id=persona, authorization_mode=authorization_mode)
         if changed != state.state:
             state.state = changed; state.revision += 1
         return result

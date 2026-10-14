@@ -259,7 +259,7 @@ def validate_function(db, f, token, body):
     return result
 
 
-def publish_function(db, f, token, *, reviewed_fixture=False):
+def publish_function(db, f, token, *, reviewed_fixture=False, reviewed_catalog_upgrade=False):
     if f.validated_revision != f.revision or not f.validation or not f.validation["valid"]:
         raise HTTPException(409, "Validate the current draft revision first")
     if reviewed_fixture:
@@ -301,7 +301,29 @@ def publish_function(db, f, token, *, reviewed_fixture=False):
                 if node.get("items"): schema(node["items"])
             schema(value.get("input_schema")); schema(value.get("output_schema"))
             return value
-        if canonical_fixture(f.definition) not in [canonical_fixture(d) for d in approved]:
+        definition_is_approved = canonical_fixture(f.definition) in [canonical_fixture(d) for d in approved]
+        if not definition_is_approved and reviewed_catalog_upgrade:
+            # Existing source-catalog functions may carry an explicitly
+            # configured presentation and authoring workflow. Preserve those
+            # user-authored contracts while installing the narrowly checked catalog policy
+            # migration. The installer marks this only after proving every
+            # other field is unchanged (apart from the enumerated catalog
+            # migrations), and the published definition must still match the
+            # source catalog once presentation is excluded.
+            checks = (f.validation or {}).get("checks") or {}
+            if checks.get("catalog_authorization_policy_upgrade") is True:
+                from copy import deepcopy
+
+                def without_user_metadata(value):
+                    cleaned = deepcopy(value)
+                    cleaned.pop("presentation", None)
+                    cleaned.pop("authoring_version", None)
+                    return canonical_fixture(cleaned)
+
+                definition_is_approved = without_user_metadata(f.definition) in [
+                    without_user_metadata(item) for item in approved
+                ]
+        if not definition_is_approved:
             nearest = min(approved, key=lambda definition: sum(definition.get(k) != f.definition.get(k) for k in Definition.model_fields))
             changed = [key for key in Definition.model_fields if nearest.get(key) != f.definition.get(key)]
             raise HTTPException(409, {"message": "Only unchanged source-controlled legacy fixtures may be bootstrapped",
@@ -500,8 +522,8 @@ def publish_agent(db, agent, token, expected_revision=None, *, authoring_capabil
         if agent.synthetic_catalog != catalog_metadata():
             raise HTTPException(409, "Unknown synthetic catalog configuration")
         snapshot["synthetic_catalog"] = agent.synthetic_catalog
-        snapshot["three_layer_prompt_revision"] = "scope-v9"
-    if any(s["definition"].get("mode") == "document" for s in snapshot.get("business_skills", [])):
+        snapshot["three_layer_prompt_revision"] = "scope-v11"
+    elif any(s["definition"].get("mode") == "document" for s in snapshot.get("business_skills", [])):
         snapshot["three_layer_prompt_revision"] = "scope-v10"
     if authoring_capability:
         snapshot["authoring_test"] = dict(agent.runtime_ui["authoring_test"])
@@ -696,13 +718,21 @@ def _runtime_timing(db, run):
 
 
 def authorize_fixture_result_access(db, call, user_id):
-    """Recheck current synthetic object grants before restoring fixture-v2 data.
+    """Recheck legacy object ACLs before restoring old connector results.
 
-    This is deliberately limited to the new demo connector. Older published
-    fixtures and resolver-backed functions retain their pinned read behavior.
+    New explicit function policies are enforced by their connector before the
+    operation. The runtime still checks run ownership and current capability
+    access, but does not second-guess the function's object-level decision.
     """
     connector = call.definition.get("connector", {})
     if connector.get("kind") == "fixture" and connector.get("version") == "3":
+        business_authorization = call.definition.get("business_authorization")
+        # Explicit policies belong to the published function. Its connector
+        # already authorized the operation before execution; generic runtime
+        # projection must not re-apply the legacy platform object ACL. Keep
+        # the old revalidation only for immutable releases without this field.
+        if isinstance(business_authorization, dict) and business_authorization.get("mode") in {"function", "none"}:
+            return
         from .synthetic_runtime import authorize_result
         try:
             authorize_result(db, call)

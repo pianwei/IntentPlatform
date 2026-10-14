@@ -88,6 +88,7 @@ def composite_definition(skill, skill_version_id, dependencies, domain_ref):
             "dependencies": [{"function_id": c["capability_id"], "version": c["version"]} for c in dependencies],
             "final_output_mapping": {name: {"$step": name, "path": "data"} for name in metadata["result_steps"]}},
         "input_schema": obj(inputs, sorted(inputs)), "output_schema": obj(outputs, sorted(outputs)),
+        "business_authorization": {"mode": "none"},
         "connector": {"kind": "fixture", "version": "3", "workflow_id": skill["key"].replace("zhiyu.skill.", "zhiyu.composite.")},
         "effect": effect, "requires_confirmation": effect == "WRITE",
         "presentation": presentation,

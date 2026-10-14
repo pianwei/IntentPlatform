@@ -115,6 +115,14 @@ def failure_detail(exc, stage):
             "Historical resolver unavailable": "HISTORY_RESOLVER_UNAVAILABLE",
             "Historical entity is ambiguous": "AMBIGUOUS_HISTORY_REFERENCE",
         }
+        definition_prefix = "Public model testing requires unchanged approved synthetic definitions:"
+        if str(exc).startswith(definition_prefix):
+            detail["reason_code"] = "PUBLIC_DEFINITION_NOT_REGISTERED"
+            mismatch = str(exc)[len(definition_prefix):].split("|", 1)
+            detail["capability_key"] = mismatch[0][:120]
+            if len(mismatch) == 2 and mismatch[1]:
+                detail["catalog_diff_fields"] = mismatch[1][:200]
+            return detail
         detail["reason_code"] = reasons.get(str(exc), "CONTRACT_VALIDATION_FAILED")
     return detail
 
@@ -286,6 +294,11 @@ def named_subjects_available(work, goal, capabilities):
     queries = set()
     for c in capabilities:
         d = c['definition']
+        # Explicit function-level policies are evaluated during binding or by
+        # the selected function. The platform does not do an early object ACL
+        # probe that could reject the request before the feature runs.
+        if d.get("business_authorization") is not None:
+            continue
         roles = {r['role']: r['type'] for r in d.get('participant_roles', [])}
         for binding in d.get('argument_bindings', {}).values():
             for entity in goal.entities:
@@ -323,10 +336,10 @@ def propose(work, skills):
         if value["source_type"] in allowed_entities and value["target_type"] in allowed_entities}
     explicit = [c for c in candidates if c["capability_id"] in projection["explicit_function_ids"]]
     prompt_revision = work["snapshot"].get("three_layer_prompt_revision", "scope-v1")
-    scoped = prompt_revision in {"scope-v2", "scope-v3", "scope-v4", "scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10"}
-    sufficient = prompt_revision in {"scope-v4", "scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10"}
-    bound_names = prompt_revision in {"scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10"}
-    outcome_scope = prompt_revision in {"scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10"}
+    scoped = prompt_revision in {"scope-v2", "scope-v3", "scope-v4", "scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10", "scope-v11"}
+    sufficient = prompt_revision in {"scope-v4", "scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10", "scope-v11"}
+    bound_names = prompt_revision in {"scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10", "scope-v11"}
+    outcome_scope = prompt_revision in {"scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10", "scope-v11"}
     goal_type = ScopedGoal if outcome_scope else Goal
     exact_request, supplied = _request_evidence(work["text"], explicit) if sufficient else (None, {})
 
@@ -446,7 +459,7 @@ def propose(work, skills):
             'zero or multiple authorized matches; the trusted resolver will handle that. Do not treat an unauthorized name as a population. '
             'negated=true means the ENTIRE request is cancelled/rejected. An exclusion such as do X but not Y leaves X active, '
             'with negated=false and Y omitted from targets. Do not treat excluded operations as requested actions.')
-    if prompt_revision in {'scope-v7', 'scope-v8', 'scope-v9', 'scope-v10'}:
+    if prompt_revision in {'scope-v7', 'scope-v8', 'scope-v9', 'scope-v10', 'scope-v11'}:
         for card in goal_data['available_goals']:
             definition = by_id[card['capability_id']]['definition']
             card['trusted_name_inputs'] = {field: next(r['type'] for r in definition['participant_roles'] if r['role'] == binding['role'])
@@ -459,7 +472,16 @@ def propose(work, skills):
             'Include a search/list target only when its actual output (a candidate list, filter results, or listed fields) '
             'is requested. Preserve an explicitly requested list even when another requested operation can bind a name. '
             'Population filtering followed by property reads still requires both requested operations.')
-    if prompt_revision in {'scope-v8', 'scope-v9', 'scope-v10'}:
+        if prompt_revision == 'scope-v11':
+            goal_instruction = goal_instruction.replace(
+                'the backend performs authorized lookup and asks the user to choose',
+                'the backend binds the mention using the selected function configuration and asks the user to choose')
+            goal_instruction = goal_instruction.replace(
+                'zero or multiple authorized matches', 'zero or multiple matches')
+            goal_instruction = goal_instruction.replace(
+                'Do not treat an unauthorized name as a population.',
+                'Do not infer a business-object authorization decision during routing.')
+    if prompt_revision in {'scope-v8', 'scope-v9', 'scope-v10', 'scope-v11'}:
         goal_instruction += (
             ' Distinguish a SUMMARY or count from a COMPREHENSIVE OVERVIEW with its detailed records. '
             'A direct summarizer already computes its declared counts/summary; retrieving its underlying record lists '
@@ -606,10 +628,14 @@ def propose(work, skills):
                                 bindings[field] = {'accepts': 'user-provided entity name or ID',
                                     'entity_type': next(r['type'] for r in definition['participant_roles'] if r['role'] == binding['role'])}
                 card['trusted_entity_inputs'] = bindings
-            rule_instruction += (' trusted_entity_inputs are resolved and authorized by the backend. Copy a name mentioned in the question '
+            rule_instruction += ((
+                ' trusted_entity_inputs are bound by the backend; object authorization follows the selected function. Copy a name mentioned in the question '
+                if prompt_revision == 'scope-v11' else
+                ' trusted_entity_inputs are resolved and authorized by the backend. Copy a name mentioned in the question '
+            ) +
                 'as the corresponding input even when its field ends in _id. Do not invent an ID and do not omit an already supplied name. '
                 'For comparison, supply each of the two names separately. Only genuinely missing or ambiguous inputs need clarification.')
-        if prompt_revision in {'scope-v8', 'scope-v9', 'scope-v10'}:
+        if prompt_revision in {'scope-v8', 'scope-v9', 'scope-v10', 'scope-v11'}:
             rule_instruction += (
                 ' Recheck the ORIGINAL QUESTION independently of the proposed goal. A summary/count requested alone '
                 'is answered by its direct summarizer, without fetching supporting record lists already internal to it. '
@@ -652,7 +678,7 @@ def propose(work, skills):
     # Model planning may use only explicitly selected direct functions. Composite
     # internals never appear as autonomous tools merely because they were pinned.
     direct = list(action_candidates)
-    if prompt_revision == "scope-v10":
+    if prompt_revision in {"scope-v10", "scope-v11"}:
         direct = [c for c in direct if c["definition"].get("execution_kind", "direct") == "direct"]
     # Only declared field-producing read prerequisites may widen the requested
     # action set. No dependency can introduce a write or an implicit capability.
@@ -706,8 +732,9 @@ def propose(work, skills):
              'At most one WRITE, the final step, with confirmation. Every known business identifier must appear in the user request. '
              'For every quantity parameter include parameter_units:{field:sourceUnit} from the user meaning; do not silently assume or convert units. '
              'Include prerequisite functions needed to resolve objects. Never silently select the first of ambiguous objects.' +
-             (' Produce the smallest sufficient plan. Stop once the requested output is obtained; no unsolicited downstream detail, overview, or statistics. '
-              'When a supplied object ID already satisfies an input, use it directly; trusted binding handles authorization, so no business lookup is needed merely for safety. '
+              (' Produce the smallest sufficient plan. Stop once the requested output is obtained; no unsolicited downstream detail, overview, or statistics. '
+               'When a supplied object ID already satisfies an input, use it directly; ' +
+               ('the selected function owns business-object authorization, so no extra platform lookup is needed merely for safety. ' if prompt_revision == "scope-v11" else 'trusted binding handles authorization, so no business lookup is needed merely for safety. ') +
               'Keep every supplied filter and use exact input enum values from the schema. Do not infer unrelated required fields. '
               'Omit absent optional arguments entirely: null is not a valid string, date or enum. For a missing required argument use an unfilled $input reference or NEEDS_INPUT. '
               'result_steps optionally lists the step_ids whose outputs the user explicitly requested, including a requested earlier output reused by another step. '
@@ -716,9 +743,10 @@ def propose(work, skills):
              (' Every accepted user-provided parameter must be a literal in arguments or a filled value in plan.inputs. '
               'Do not leave a $input placeholder empty when the question already supplies the value the user wants to use. '
               'A missing value means genuinely absent or ambiguous after considering corrections and negations, not merely stored in a reference. '
-              'Before returning NEEDS_INPUT or an unfilled $input, reread the complete request for that parameter.' if prompt_revision in {"scope-v3", "scope-v4", "scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10"} else '') +
+              'Before returning NEEDS_INPUT or an unfilled $input, reread the complete request for that parameter.' if prompt_revision in {"scope-v3", "scope-v4", "scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10", "scope-v11"} else '') +
              (' Fields declared in argument_bindings accept the literal entity name from the question, even if named *_id; '
-              'the backend resolves and authorizes it before dispatch. Do not ask for an ID if a name was supplied. '
+              + ('the backend binds it to the registered entity and the selected function applies its configured object authorization. The platform enforces workspace, application and function access, not customer/account ACLs. Do not suppress a function based on guessed object ownership. ' if prompt_revision == "scope-v11" else 'the backend resolves and authorizes it before dispatch. ') +
+              'Do not ask for an ID if a name was supplied. '
               'For name_or_id_parameters use the supplied entity name directly; a preceding name search is unnecessary and may silently pick the wrong duplicate. '
               'Every result reference path, including foreach.path and when.path, MUST start with data. Copy an approved_result_paths value exactly; '
               'output_schema describes the data envelope contents, not the full response. Never use a bare field name as a path. '
@@ -728,7 +756,8 @@ def propose(work, skills):
               'by only locating its object, and never guess identifiers. '
               'INDEXED_ENTITY_REQUIRES_BINDING_OR_BATCH means a bound entity argument cannot take an arbitrary numeric list index: '
               'use the supplied name directly for trusted disambiguation, or foreach for a requested population. '
-              'For selection=named, pass that name directly to name_or_id_parameters; do not search and foreach around authorization '
+              'For selection=named, pass that name directly to name_or_id_parameters; do not search and foreach around ' +
+              ('function-owned authorization ' if prompt_revision == "scope-v11" else 'authorization ') +
               'or disambiguation. NAMED_ENTITY_REQUIRES_TRUSTED_BINDING means remove that lookup and pass the literal name.' if bound_names else '') +
              (' The original question defines the output scope, not possible business follow-ups. Published aliases are equivalent '
               'to their function names. supplied_parameter_evidence gives already supplied literal values; use accepted values '
@@ -844,13 +873,15 @@ def validate_step(db, run, plan, step, arguments, index, release):
         raise ValueError("Plan arguments are invalid")
     if any(condition(c, args) is not True for c in definition.get("preconditions", [])):
         raise PermissionError("Preconditions are false or unknown")
-    if definition['connector'].get('kind') == 'fixture' and definition['connector'].get('version') == '3':
+    if (definition['connector'].get('kind') == 'fixture' and definition['connector'].get('version') == '3'
+            and definition.get("business_authorization") is None):
         from .synthetic_runtime import persona_for_run, state_for_run, CATALOG_ID
         from .models import SyntheticState
         from .zhiyu import authorize_operation
         state = state_for_run(db, run)
-        # Role-only restrictions (e.g. supervisor ranking) must also reject
-        # before a Call is registered, not merely inside the connector.
+        # Historical releases without an explicit policy retain their pinned
+        # platform-side object check. New functions enforce their own policy
+        # inside the connector/feature handler.
         authorize_operation(definition['connector']['workflow_id'], args, state, persona_for_run(db, run))
     records = {k: v for k, v in (run.bindings or {}).items() if k.startswith(slot + ":")}
     trace(db, run, "entity", "objects_bound", {"step": step.step_key, "bindings": [

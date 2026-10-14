@@ -26,6 +26,11 @@ export type SyntheticCatalog = { id: string; version: number; personas: { id: st
 export type PublicApp = { public_id: string; agent_id: string; release_id: string; runtime_ui: RuntimeUI; channels: Channels; fixture_mode: boolean; synthetic_catalog?: SyntheticCatalog | null };
 export type FunctionDefinition = {
   authoring_version?: "legacy" | "function-v2";
+  business_authorization?: {
+    mode: "function" | "none";
+    user_id_header?: string | null;
+    workspace_id_header?: string | null;
+  } | null;
   output_examples?: unknown[];
   execution_kind?: "direct" | "composite";
   composite?: {

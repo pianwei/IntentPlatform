@@ -1,4 +1,5 @@
 """Explicit development installation of the reviewed Zhiyu catalog."""
+from copy import deepcopy
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -7,7 +8,7 @@ from .db import session, set_identity
 from .config import settings
 from .models import (Agent, Function, FunctionVersion, DomainPackage, DomainVersion, ActionDefinition, ActionDefinitionVersion,
                      BusinessSkill, BusinessSkillVersion, SyntheticState, ModelProfile, Release)
-from .schemas import Definition, ValidateBody
+from .schemas import BusinessAuthorization, Definition, ValidateBody
 from .domain_schemas import DomainDefinition
 from .domains import compile_domain
 from .services import validate_function, publish_function, publish_agent, agent_view, compile_for_workspace
@@ -109,8 +110,6 @@ def install(ws: str, model_profile_id: str | None = Body(default=None, embed=Tru
     db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": ws + ":" + CATALOG_ID})
     agent = db.scalar(select(Agent).where(Agent.workspace_id == ws, Agent.synthetic_catalog["id"].as_string() == CATALOG_ID,
                                         Agent.runtime_ui["authoring_test"].is_(None)))
-    if agent and document_skills:
-        return upgrade_documents(ws, model_profile_id, token, db)
     if model_profile_id:
         model = db.get(ModelProfile, model_profile_id)
         if not model or model.workspace_id != ws or model.disabled or not model.latest_version:
@@ -140,7 +139,33 @@ def install(ws: str, model_profile_id: str | None = Body(default=None, embed=Tru
             action.latest_version = 1
             db.add(ActionDefinitionVersion(workspace_id=ws, action_id=action.id, version=1, definition=item))
 
+    catalog_packages = function_packages(ref, three_layer=True)
+    catalog_policies = {item["key"]: item["definition"].get("business_authorization") for item in catalog_packages}
+    description_migrations = {
+        "zhiyu.customer.search": (
+            "【智驭模拟业务】按名称、编号、城市或业务标签查询当前角色管户；不是客户画像问答。",
+            "【智驭模拟业务】按名称、编号、城市或业务标签查询模拟客户目录；不是客户画像问答，对象权限由本功能版本配置。",
+        ),
+        "zhiyu.segment.list": (
+            "【智驭模拟业务】列出当前角色有获准客户的客群包，仅展示授权范围内人数。",
+            "【智驭模拟业务】列出模拟目录中的营销客群及关联人数，对象权限由本功能版本配置。",
+        ),
+        "zhiyu.marketing.list": (
+            "【智驭模拟业务】查询当前角色获准营销任务和进度。",
+            "【智驭模拟业务】查询模拟目录中的营销任务和进度，对象权限由本功能版本配置。",
+        ),
+    }
+
     def add_function(raw):
+        from copy import deepcopy
+
+        def changed_paths(before, after, prefix=""):
+            if isinstance(before, dict) and isinstance(after, dict):
+                return [path for field in sorted(set(before) | set(after))
+                        for path in changed_paths(before.get(field), after.get(field),
+                                                  f"{prefix}.{field}" if prefix else field)]
+            return [] if before == after else [prefix]
+
         normalized = Definition.model_validate(raw).model_dump()
         key = normalized["connector"]["workflow_id"]
         f = db.scalar(select(Function).where(Function.workspace_id == ws,
@@ -149,7 +174,116 @@ def install(ws: str, model_profile_id: str | None = Body(default=None, embed=Tru
         if f is None:
             f = Function(workspace_id=ws, definition=normalized, source_state={"synthetic_catalog": CATALOG_ID, "catalog_version": 1})
             db.add(f); db.flush()
-        if f.definition != normalized or f.disabled: raise HTTPException(409, "已安装功能有修改或已停用，不能覆盖")
+        if f.disabled: raise HTTPException(409, "已安装功能已停用，不能覆盖")
+        if f.definition != normalized:
+            old = Definition.model_validate(f.definition).model_dump()
+            new = deepcopy(normalized)
+            old_mode = old.pop("business_authorization", None)
+            new_mode = new.pop("business_authorization", None)
+            expected_mode = catalog_policies.get(key)
+            old_auth = BusinessAuthorization.model_validate(old_mode).model_dump() if old_mode is not None else None
+            new_auth = BusinessAuthorization.model_validate(new_mode).model_dump() if new_mode is not None else None
+            expected_auth = BusinessAuthorization.model_validate(expected_mode).model_dump() if expected_mode is not None else None
+            policy_migration = (
+                (expected_auth is None and old_auth is None and new_auth is None)
+                or (expected_auth is not None and new_auth == expected_auth
+                    and (old_auth is None or old_auth == expected_auth
+                         or (expected_auth["mode"] == "function" and old_auth == {"mode": "none", "user_id_header": None, "workspace_id_header": None})))
+            )
+            policy_changed = old_auth != expected_auth
+            description_migration = (
+                key in description_migrations
+                and old.get("description") == description_migrations[key][0]
+                and new.get("description") == description_migrations[key][1]
+            )
+            if description_migration:
+                old["description"] = new["description"]
+            output_schema_migration = False
+            if key == "zhiyu.customer.search":
+                expected_old_schema = deepcopy(new.get("output_schema"))
+                try:
+                    expected_old_schema["properties"]["customers"]["items"]["properties"]["tags"] = {
+                        "type": "string", "minLength": 1, "maxLength": 200,
+                    }
+                    output_schema_migration = old.get("output_schema") == expected_old_schema
+                except (KeyError, TypeError):
+                    output_schema_migration = False
+                if output_schema_migration:
+                    old["output_schema"] = deepcopy(new["output_schema"])
+            precondition_migration = False
+            expected_old_preconditions = deepcopy(new.get("trusted_preconditions"))
+            if isinstance(expected_old_preconditions, dict):
+                for condition in expected_old_preconditions.get("all", []):
+                    if isinstance(condition, dict) and isinstance(condition.get("fact"), str):
+                        condition["fact"] = condition["fact"].replace(".bound", ".authorized")
+                precondition_migration = old.get("trusted_preconditions") == expected_old_preconditions
+                if precondition_migration:
+                    old["trusted_preconditions"] = deepcopy(new["trusted_preconditions"])
+            # Keep the installed editing contract when republishing this
+            # source-catalog function; in particular, never downgrade a
+            # function-v2 revision to the catalog template's legacy default.
+            authoring_version_preserved = old.get("authoring_version") != new.get("authoring_version")
+            if authoring_version_preserved:
+                new["authoring_version"] = old.get("authoring_version")
+                normalized["authoring_version"] = old.get("authoring_version")
+            old_composite = old.get("composite")
+            new_composite = new.get("composite")
+            dependency_upgrade = old_composite is None and new_composite is None
+            dependency_changed = False
+            if isinstance(old_composite, dict) and isinstance(new_composite, dict):
+                old_dependencies = old_composite.get("dependencies", [])
+                new_dependencies = new_composite.get("dependencies", [])
+                dependency_changed = old_dependencies != new_dependencies
+                dependency_upgrade = ([item.get("function_id") for item in old_dependencies]
+                                     == [item.get("function_id") for item in new_dependencies]
+                                     and all(item.get("version", 0) <= new_item.get("version", 0)
+                                             for item, new_item in zip(old_dependencies, new_dependencies)))
+                if dependency_upgrade:
+                    old_composite["dependencies"] = deepcopy(new_dependencies)
+            presentation_preserved = old.get("presentation") != new.get("presentation")
+            if presentation_preserved:
+                new["presentation"] = deepcopy(old.get("presentation"))
+                normalized["presentation"] = deepcopy(old.get("presentation"))
+            catalog_update_required = (policy_changed or description_migration or output_schema_migration
+                                       or precondition_migration or dependency_changed)
+            # This narrowly permits the catalog's explicit authorization
+            # migration, approved description corrections, and version
+            # repinning of its own composite children.
+            # Any edited business or connector field still stops installation.
+            only_catalog_upgrade = (
+                policy_migration
+                and dependency_upgrade
+                and old == new
+                and f.latest_version > 0
+                and f.status in {"draft", "validated", "published"}
+            )
+            if not only_catalog_upgrade:
+                changed_fields = changed_paths(old, new)
+                raise HTTPException(409, {"message": "已安装功能有修改或已停用，不能覆盖",
+                                          "function_key": key, "changed_fields": changed_fields,
+                                          "migration_checks": {
+                                              "policy_migration": policy_migration,
+                                              "dependency_upgrade": dependency_upgrade,
+                                              "definition_unchanged_after_catalog_migrations": old == new,
+                                              "revision_validated": f.validated_revision == f.revision,
+                                              "eligible_status": f.status in {"published", "validated"},
+                                          }})
+            if catalog_update_required:
+                f.definition = normalized
+                f.revision += 1
+                f.validation = {"valid": True, "revision": f.revision, "errors": [],
+                                "checks": {"catalog_authorization_policy_upgrade": True}, "probe": None}
+                f.validated_revision = f.revision
+                f.status = "validated"
+                publish_function(db, f, token, reviewed_fixture=True, reviewed_catalog_upgrade=True)
+                audit(db, token.user_id, ws, "synthetic.function_authorization_upgrade", f.id,
+                      {"version": f.latest_version, "mode": expected_auth.get("mode") if expected_auth else None,
+                       "description_migrated": description_migration,
+                       "output_schema_migrated": output_schema_migration,
+                       "preconditions_migrated": precondition_migration,
+                       "authoring_version_preserved": authoring_version_preserved,
+                       "presentation_preserved": presentation_preserved,
+                       "dependencies_repinned": dependency_changed})
         if not f.latest_version:
             if normalized.get("execution_kind") == "composite":
                 from .agent_projection import composite_parts
@@ -164,12 +298,21 @@ def install(ws: str, model_profile_id: str | None = Body(default=None, embed=Tru
             publish_function(db, f, token, reviewed_fixture=True)
         return f
 
-    functions = [add_function(p["definition"]) for p in function_packages(ref, three_layer=True)]
+    functions = [add_function(p["definition"]) for p in catalog_packages]
     by_key = {f.definition["connector"]["workflow_id"]: f for f in functions}
     composites = []
     for item in business_skill_templates():
         item = {k: v for k, v in item.items() if k != "version"}
         skill = db.scalar(select(BusinessSkill).where(BusinessSkill.workspace_id == ws, BusinessSkill.key == item["key"]))
+        if skill and document_skills and skill.definition.get("mode") == "document":
+            key = item["key"].replace("zhiyu.skill.", "zhiyu.composite.")
+            existing_composite = db.scalar(select(Function).where(
+                Function.workspace_id == ws,
+                Function.definition["connector"]["workflow_id"].as_string() == key))
+            if not existing_composite or existing_composite.disabled:
+                raise HTTPException(409, "Reviewed document composite is unavailable")
+            composites.append(existing_composite)
+            continue
         if skill is None:
             skill = BusinessSkill(workspace_id=ws, key=item["key"], definition=item)
             db.add(skill); db.flush()
@@ -200,7 +343,7 @@ def install(ws: str, model_profile_id: str | None = Body(default=None, embed=Tru
         if model_profile_id: agent.model_profile_id = model_profile_id
         agent.revision += 1
     published = db.get(Release, agent.current_release_id) if agent.current_release_id else None
-    if changed or not published or published.snapshot.get("synthetic_catalog") != catalog_metadata() or published.snapshot.get("three_layer_prompt_revision") != "scope-v9":
+    if not document_skills and (changed or not published or published.snapshot.get("synthetic_catalog") != catalog_metadata() or published.snapshot.get("three_layer_prompt_revision") != "scope-v11"):
         publish_agent(db, agent, token, agent.revision)
     audit(db, token.user_id, ws, "synthetic.install", agent.id, {"catalog_id": CATALOG_ID, "version": 1, "scenarios": 14})
     result = {"agent": agent_view(agent, db), "scenario_count": 14, "function_count": len(functions),
@@ -249,28 +392,130 @@ def upgrade_documents(ws: str, model_profile_id: str | None = Body(default=None,
         function = db.scalar(select(Function).where(Function.workspace_id == ws, Function.definition["connector"]["workflow_id"].as_string() == key).with_for_update())
         if not function or function.disabled:
             raise HTTPException(409, "Reviewed composite is unavailable")
-        dependencies = [versioned_capability(db, ws, d["function_id"], d["version"], token.user_id) for d in function.definition["composite"]["dependencies"]]
+        old_dependencies = [versioned_capability(db, ws, d["function_id"], d["version"], token.user_id)
+                            for d in function.definition["composite"]["dependencies"]]
+        dependencies = [versioned_capability(db, ws, d["function_id"], None, token.user_id)
+                        for d in function.definition["composite"]["dependencies"]]
+        if any(new["version"] < old["version"] for old, new in zip(old_dependencies, dependencies)):
+            raise HTTPException(409, "Composite dependency version cannot move backwards")
         ref = function.definition["domain_refs"][0]
         expected = Definition.model_validate(document_composite_definition(document, version.id, dependencies, ref)).model_dump()
-        # Preserve approved examples as management metadata, never as execution.
-        expected["output_examples"] = function.definition.get("output_examples", [])
-        if function.definition != expected:
+        current_definition = Definition.model_validate(function.definition).model_dump()
+        validation_before_catalog_change = function.validation or {}
+        execution_test_before_catalog_change = validation_before_catalog_change.get("execution_test") or {}
+        resume_diagnostics = {
+            "definition_matches_catalog_before": current_definition == expected,
+            "definition_delta_fields_before": sorted(field for field in set(current_definition) | set(expected)
+                if current_definition.get(field) != expected.get(field)),
+            "revision_before": function.revision,
+            "latest_version_before": function.latest_version,
+            "status_before": function.status,
+            "validated_revision_matches_before": function.validated_revision == function.revision,
+            "validation_present_before": bool(validation_before_catalog_change),
+            "execution_test_present_before": bool(execution_test_before_catalog_change.get("run_id")),
+            "execution_test_revision_matches_before": execution_test_before_catalog_change.get("revision") == function.revision,
+            "execution_test_status_before": execution_test_before_catalog_change.get("status"),
+        }
+        # Preserve user-facing examples and editor metadata; these fields do
+        # not alter the composite Skill execution plan.
+        preserved_metadata = ("output_examples", "authoring_version")
+        for field in preserved_metadata:
+            expected[field] = deepcopy(current_definition[field])
+        # A legacy composite had no explicit policy. Upgrade only that case to
+        # the reviewed default; preserve any policy a maintainer already set.
+        if current_definition.get("business_authorization") is not None:
+            expected["business_authorization"] = deepcopy(current_definition["business_authorization"])
+        # Compare the normalized authoring definition after preserved metadata
+        # has been reapplied. Raw JSONB and the generated template may differ
+        # in presentation while the effective definition is already current.
+        if current_definition != expected:
             prior_version_id = function.definition["composite"]["skill_version_id"]
-            prior_skill = db.get(BusinessSkillVersion, prior_version_id)
-            old_expected = Definition.model_validate(composite_definition(templates[document["key"]], prior_version_id, dependencies, ref)).model_dump()
-            if Definition.model_validate(function.definition).model_dump() != old_expected:
-                raise HTTPException(409, "Modified composite cannot be overwritten by the catalog upgrade")
-            function.definition = expected; function.revision += 1; function.validation = None; function.validated_revision = None; function.status = "draft"
+            if function.definition["composite"].get("mode", "template") == "document":
+                old_expected = Definition.model_validate(document_composite_definition(
+                    document, prior_version_id, old_dependencies, ref)).model_dump()
+            else:
+                old_expected = Definition.model_validate(composite_definition(
+                    templates[document["key"]], prior_version_id, old_dependencies, ref)).model_dump()
+            for field in preserved_metadata:
+                old_expected[field] = deepcopy(current_definition[field])
+            old_expected["business_authorization"] = deepcopy(current_definition.get("business_authorization"))
+            # Once a composite is document-driven, its presentation is part of
+            # the maintainer's published display contract. Re-deriving it on
+            # each resumable catalog install can bump the function revision
+            # after a confirmed write test and demand the same confirmation
+            # again. Preserve it; output-contract validation still rejects
+            # incompatible mappings before a version can publish.
+            preserve_presentation = (
+                current_definition.get("composite", {}).get("mode") == "document"
+                or current_definition.get("presentation") != old_expected.get("presentation")
+            )
+            if preserve_presentation:
+                expected["presentation"] = deepcopy(current_definition["presentation"])
+                old_expected["presentation"] = deepcopy(current_definition["presentation"])
+            # Re-check after applying the presentation-preservation rule. If
+            # that was the only difference, this is an idempotent retry, not a
+            # new function revision and not a reason to re-run a write test.
+            if current_definition != expected:
+                if current_definition != old_expected:
+                    changed_fields = sorted(field for field in set(current_definition) | set(old_expected)
+                                            if current_definition.get(field) != old_expected.get(field))
+                    raise HTTPException(409, {"message": "Modified composite cannot be overwritten by the catalog upgrade",
+                                              "changed_fields": changed_fields})
+                function.definition = expected; function.revision += 1; function.validation = None; function.validated_revision = None; function.status = "draft"
+                resume_diagnostics["definition_migrated_this_request"] = True
+                resume_diagnostics["revision_after_migration"] = function.revision
         published = db.scalar(select(FunctionVersion).where(FunctionVersion.function_id == function.id,
                                                           FunctionVersion.version == function.latest_version))
-        if not published or published.definition.get("composite", {}).get("mode") != "document":
-            checked = validate_function(db, function, token, ValidateBody(revision=function.revision, probe=True,
-                arguments=TEST_INPUTS[document["key"].rsplit(".", 1)[-1]], test_goal=document["name"], model_profile_id=model_id,
-                allow_effects=function.definition["effect"] == "WRITE"))
-            if not checked["valid"] or not (checked.get("execution_test") or {}).get("passed"):
-                detail = {"function": document["name"], "function_id": function.id, "errors": checked["errors"], "execution_test": checked.get("execution_test")}
-                db.commit()
-                raise HTTPException(409, detail)
+        # Output examples belong to the editable authoring record; publish
+        # intentionally strips them from immutable runtime snapshots. Ignore
+        # only that field when deciding whether this composite still needs a
+        # tested/published catalog upgrade, otherwise every retry re-runs a
+        # write test whenever the maintainer has saved an example.
+        published_definition = deepcopy(published.definition) if published else None
+        if published_definition is not None:
+            published_definition["output_examples"] = function.definition.get("output_examples", [])
+        if (not published or published_definition != function.definition
+                or published.definition.get("composite", {}).get("mode") != "document"
+                or function.status != "published" or function.validated_revision != function.revision):
+            # Confirmation is a separate request from the original test. Once
+            # its run reaches SUCCEEDED, reuse that exact execution evidence on
+            # the resumable install request instead of planning/sending again.
+            prior_test = ((function.validation or {}).get("execution_test") or {})
+            reused_test = False
+            resume_diagnostics.update({"prior_test_present_after_migration": bool(prior_test.get("run_id")),
+                "prior_test_revision_matches_after_migration": prior_test.get("revision") == function.revision,
+                "prior_test_status_after_migration": prior_test.get("status")})
+            if prior_test.get("revision") == function.revision and prior_test.get("run_id"):
+                from .authoring_tests import test_result
+                refreshed = test_result(db, function, token)
+                resume_diagnostics.update({"prior_test_now_passes": bool(refreshed.get("passed")),
+                    "prior_test_current_status": refreshed.get("status")})
+                if refreshed.get("passed"):
+                    static = validate_function(db, function, token,
+                        ValidateBody(revision=function.revision, probe=False))
+                    static_test = (static.get("execution_test") or {})
+                    resume_diagnostics.update({"static_validation_passes": bool(static.get("valid")),
+                        "static_error_count": len(static.get("errors") or []),
+                        "static_test_run_matches": static_test.get("run_id") == prior_test.get("run_id"),
+                        "static_test_revision_matches": static_test.get("revision") == function.revision})
+                    if (static.get("valid") and static_test.get("revision") == function.revision
+                            and static_test.get("run_id") == prior_test.get("run_id")):
+                        function.validation = {**static, "execution_test": refreshed,
+                            "probe": {"status": "SUCCEEDED", "data": refreshed.get("data", {})}}
+                        function.validation["valid"] = True
+                        function.validation["errors"] = []
+                        function.validated_revision = function.revision
+                        function.status = "validated"
+                        reused_test = True
+            if not reused_test:
+                checked = validate_function(db, function, token, ValidateBody(revision=function.revision, probe=True,
+                    arguments=TEST_INPUTS[document["key"].rsplit(".", 1)[-1]], test_goal=document["name"], model_profile_id=model_id,
+                    allow_effects=function.definition["effect"] == "WRITE"))
+                if not checked["valid"] or not (checked.get("execution_test") or {}).get("passed"):
+                    detail = {"function": document["name"], "function_id": function.id, "errors": checked["errors"], "execution_test": checked.get("execution_test")}
+                    detail["resume_diagnostics"] = resume_diagnostics
+                    db.commit()
+                    raise HTTPException(409, detail)
             publish_function(db, function, token)
         records.append({"name": document["name"], "function_id": function.id, "version": function.latest_version})
         owner = token.user_id
@@ -280,7 +525,7 @@ def upgrade_documents(ws: str, model_profile_id: str | None = Body(default=None,
     if model_id:
         agent.model_profile_id = model_id
     prior = db.get(Release, agent.current_release_id)
-    if not prior or prior.snapshot.get("three_layer_prompt_revision") != "scope-v10" or any(
+    if not prior or prior.snapshot.get("three_layer_prompt_revision") != "scope-v11" or any(
         next(c["version"] for c in prior.snapshot["capabilities"] if c["capability_id"] == row["function_id"]) != row["version"] for row in records):
         agent.revision += 1
         publish_agent(db, agent, token, agent.revision)

@@ -160,6 +160,21 @@ def test_confirmed_write_is_atomic_idempotent_and_unknown_is_reconciled_without_
     listed = run("marketing.list", {"customer_id": "ZY-C001"}, state=changed)[0]["data"]["tasks"]
     assert [r["task_id"] for r in listed] == ["ZY-MT001", "ZY-MT003"]
 
+def test_marketing_write_ignores_namespaced_source_task_ids():
+    state = initial_state()
+    source_id = "SWB-ZY-MT001-L01"
+    source_row = {"task_id": source_id, "customer_id": "ZY-C001", "title": "保留的来源任务"}
+    state["marketing_tasks"][source_id] = deepcopy(source_row)
+
+    result, changed = run("marketing.create", {
+        "customer_id": "ZY-C001", "title": "模拟补齐任务", "due_on": "2026-10-20",
+    }, state=state, op="hybrid-source-write")
+
+    assert result["status"] == "SUCCEEDED"
+    assert result["data"]["task_id"] == "ZY-MT003"
+    assert changed["marketing_tasks"][source_id] == source_row
+    assert state["marketing_tasks"][source_id] == source_row
+
 def _resolve_args(arguments, inputs, outcomes):
     args = {}
     for field, value in arguments.items():
@@ -240,6 +255,62 @@ def test_mismatched_catalog_state_and_indirect_ownership_cannot_bypass_authoriza
                               ("visit_id", "ZY-V002"), ("postloan_id", "ZY-PL003")):
         with pytest.raises(PermissionError):
             authorize_operation("zhiyu.entity", {field: identifier}, initial_state(), "manager_a")
+
+
+def test_business_object_authorization_is_explicitly_owned_by_each_new_function():
+    from intent_platform.zhiyu.engine import resolve as resolve_zhiyu
+
+    definitions = [item["definition"] for item in function_packages(REF, three_layer=True)]
+    function_owned = {
+        "zhiyu.customer.search", "zhiyu.customer.profile", "zhiyu.customer.cooperation", "zhiyu.customer.feedback",
+        "zhiyu.visit.script", "zhiyu.roleplay.start", "zhiyu.todo.list", "zhiyu.todo.plan",
+        "zhiyu.segment.list", "zhiyu.marketing.list", "zhiyu.marketing.create", "zhiyu.visit.list",
+        "zhiyu.visit.brief", "zhiyu.visit.minutes", "zhiyu.diligence.draft", "zhiyu.diligence.facts",
+        "zhiyu.postloan.tasks", "zhiyu.postloan.checks", "zhiyu.postloan.summary",
+    }
+    assert definitions and all("business_authorization" in item for item in definitions)
+    assert {item["connector"]["workflow_id"] for item in definitions
+            if item["business_authorization"]["mode"] == "function"} == function_owned
+    state = initial_state()
+    with pytest.raises(PermissionError):
+        execute("zhiyu.customer.profile", {"customer_id": "ZY-C002"}, state, "function-policy-denial",
+                persona_id="manager_a", authorization_mode="function")
+
+    result, _ = execute("zhiyu.customer.profile", {"customer_id": "ZY-C002"}, state, "function-policy-allow",
+                        persona_id="manager_a", authorization_mode="none")
+    assert result["status"] == "SUCCEEDED" and result["data"]["customer_id"] == "ZY-C002"
+    assert resolve_zhiyu("zhiyu:Customer", state, "manager_a", "海岚供应链") == []
+    assert resolve_zhiyu("zhiyu:Customer", state, "manager_a", "海岚供应链",
+                         authorization_mode="function")[0]["id"] == "ZY-C002"
+    assert resolve_zhiyu("zhiyu:Customer", state, "manager_a", "海岚供应链",
+                         authorization_mode="none")[0]["id"] == "ZY-C002"
+    with pytest.raises(PermissionError):
+        execute("zhiyu.customer.profile", {"customer_id": "ZY-C002"}, state,
+                "function-permission-is-applied-at-execution", persona_id="manager_a",
+                authorization_mode="function")
+
+
+def test_unknown_catalog_state_and_trusted_persona_provenance_remain_enforced_without_object_acl():
+    state = initial_state()
+    state["catalog_version"] = 999
+    with pytest.raises(PermissionError):
+        execute("zhiyu.customer.profile", {"customer_id": "ZY-C002"}, state, "bad-catalog",
+                persona_id="manager_a", authorization_mode="none")
+    valid = initial_state()
+    _, valid = execute("zhiyu.marketing.create", {
+        "customer_id": "ZY-C002", "title": "跨角色核对来源归属", "due_on": "2026-10-20",
+    }, valid, "persona-bound", persona_id="manager_a", authorization_mode="none")
+    with pytest.raises(PermissionError):
+        reconcile("persona-bound", valid, persona_id="manager_b", authorization_mode="none")
+
+
+def test_function_role_policy_remains_enforced_when_object_acl_is_disabled():
+    with pytest.raises(PermissionError, match="supervisor role"):
+        execute("zhiyu.performance.ranking", {"period": "2026-09"}, initial_state(), "manager-ranking",
+                persona_id="manager_a", authorization_mode="none")
+    ranking, _ = execute("zhiyu.performance.ranking", {"period": "2026-09"}, initial_state(), "supervisor-ranking",
+                         persona_id="supervisor", authorization_mode="none")
+    assert ranking["status"] == "SUCCEEDED" and len(ranking["data"]["ranking"]) == 2
 
 def test_registered_filter_suffixes_are_conservative_and_product_query_searches_metadata():
     assert run("customer.search", {"tag": "供应链核心客户"})[0]["data"] == run("customer.search", {"tag": "供应链核心"})[0]["data"]

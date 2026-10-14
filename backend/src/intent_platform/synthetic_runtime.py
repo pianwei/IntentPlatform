@@ -51,6 +51,9 @@ def state_for_run(db, run):
 
 
 def authorize_result(db, call):
+    business_authorization = call.definition.get("business_authorization")
+    if isinstance(business_authorization, dict) and business_authorization.get("mode") == "none":
+        return
     from .models import Run
     from .zhiyu import authorize_operation
     run = db.get(Run, call.run_id)

@@ -15,6 +15,7 @@ import pytest
 
 from intent_platform.config import settings
 from intent_platform.network import MAX_JSON_RESPONSE_BYTES, request_json, request_json_parts
+from intent_platform import ports
 from intent_platform.ports import connector_checks, execute_connector
 from intent_platform.schemas import Definition
 
@@ -146,6 +147,34 @@ def test_bounded_stream_handles_chunks_gzip_errors_and_redirects(workflow_socket
     assert exc.value.response.status_code == 404
     assert exc.value.response.json() == {"reason": "synthetic-not-found"}
     assert "/json" not in observed["gets"]
+
+
+def test_explicit_function_authorization_does_not_call_global_object_authorizer(monkeypatch):
+    cfg = settings()
+    monkeypatch.setattr(cfg, "object_authorization_url", "http://127.0.0.1:9/global-acl")
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"allowed": True}
+
+    monkeypatch.setattr(ports, "request_json", request)
+    definition = {"business_authorization": {"mode": "function"}, "action": "READ",
+                  "object_type": "Customer", "arguments": {"customer_id": "C-1"}}
+
+    ports.legacy_object_authorization(definition, "user-1", "workspace-1", "http://feature.local/read")
+    assert calls == []
+    ports.legacy_object_authorization({k: v for k, v in definition.items() if k != "business_authorization"},
+                                      "user-1", "workspace-1", "http://feature.local/read")
+    assert len(calls) == 1 and calls[0][1]["payload"]["user_id"] == "user-1"
+
+
+def test_trusted_identity_headers_are_only_added_for_function_owned_policy():
+    definition = {"business_authorization": {"mode": "function", "user_id_header": "X-Actor",
+                                               "workspace_id_header": "X-Tenant"}}
+    assert ports.configured_identity_headers(definition, "u-7", "ws-4") == {
+        "X-Actor": "u-7", "X-Tenant": "ws-4"}
+    assert ports.configured_identity_headers({"business_authorization": {"mode": "none"}}, "u-7", "ws-4") == {}
 
 
 def dify_definition(origin, state, *, timeout=1):

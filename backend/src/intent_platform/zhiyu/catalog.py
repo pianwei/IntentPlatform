@@ -67,8 +67,8 @@ def _p(key, name, scenario, entity, action, inputs, outputs, sample, aliases, pu
 _PACKAGES = [
     _p("customer.search", "筛选与定位客户", 1, "Customer", "LOCATE",
        {"query": s(100), "tag": s(80), "city": s(60)},
-       {"customers": rows({"customer_id": ID, "name": s(), "city": s(60), "manager_name": s(60), "tags": s()})},
-       {"tag": "代发高潜"}, ["查客户", "我名下的客户", "客户筛选"], "按名称、编号、城市或业务标签查询当前角色管户；不是客户画像问答。", []),
+       {"customers": rows({"customer_id": ID, "name": s(), "city": s(60), "manager_name": s(60), "tags": s(80, 0)})},
+       {"tag": "代发高潜"}, ["查客户", "我名下的客户", "客户筛选"], "按名称、编号、城市或业务标签查询模拟客户目录；不是客户画像问答，对象权限由本功能版本配置。", []),
     _p("customer.profile", "客户画像与指标", 2, "Customer", "READ", {**CUST, "metric": s(80)},
        {"customer_id": ID, "name": s(), "industry": s(), "deposit": N, "credit_used": N,
         "payroll_count": I, "currency": s(10), "profile_text": s(1800), "metric": s(80, 0), "metric_value": s(200, 0)},
@@ -115,10 +115,10 @@ _PACKAGES = [
        {"period": "2026-09"}, ["辖内业绩排名", "客户经理排名", "主管业绩汇总"], "仅模拟主管可按完成率查看辖内排名；不允许普通经理查看其他经理业绩。"),
     _p("segment.list", "查看营销客群包", 11, "Segment", "LIST", {"query": s(100)},
        {"segments": rows({"segment_id": ID, "name": s(), "customer_count": I, "description": s(1000)})},
-       {}, ["查看客群包", "营销客群", "可用客群包"], "列出当前角色有获准客户的客群包，仅展示授权范围内人数。", []),
+       {}, ["查看客群包", "营销客群", "可用客群包"], "列出模拟目录中的营销客群及关联人数，对象权限由本功能版本配置。", []),
     _p("marketing.list", "查询营销任务与进度", 11, "MarketingTask", "LIST", {"customer_id": ID, "status": s(40)},
        {"tasks": rows({"task_id": ID, "customer_id": ID, "title": s(), "owner_name": s(60), "due_on": s(10), "status": s(40)})},
-       {}, ["查看营销任务", "任务完成情况", "我的营销任务"], "查询当前角色获准营销任务和进度。", []),
+       {}, ["查看营销任务", "任务完成情况", "我的营销任务"], "查询模拟目录中的营销任务和进度，对象权限由本功能版本配置。", []),
     _p("marketing.create", "创建模拟营销任务", 11, "MarketingTask", "CREATE",
        {**CUST, "title": s(160), "due_on": s(10)},
        {"task_id": ID, "customer_id": ID, "title": s(), "owner_name": s(60), "due_on": s(10), "status": s(40)},
@@ -148,6 +148,16 @@ _PACKAGES = [
        {"customer_id": "ZY-C001"}, ["贷后管理概览", "贷后情况汇总", "客户贷后整体情况"], "确定性汇总待办和已有检查结果，不自动变更贷后任务。"),
 ]
 
+# These handlers read or mutate customer-owned records. Their object ACL is
+# deliberately part of each function's fixed version, not the platform router.
+_FUNCTION_AUTHORIZED = {
+    "zhiyu.customer.search", "zhiyu.customer.profile", "zhiyu.customer.cooperation", "zhiyu.customer.feedback",
+    "zhiyu.visit.script", "zhiyu.roleplay.start", "zhiyu.todo.list", "zhiyu.todo.plan",
+    "zhiyu.segment.list", "zhiyu.marketing.list", "zhiyu.marketing.create", "zhiyu.visit.list",
+    "zhiyu.visit.brief", "zhiyu.visit.minutes", "zhiyu.diligence.draft", "zhiyu.diligence.facts",
+    "zhiyu.postloan.tasks", "zhiyu.postloan.checks", "zhiyu.postloan.summary",
+}
+
 def function_packages(domain_ref=None, *, three_layer=False):
     packages = []
     for p in _PACKAGES:
@@ -171,6 +181,11 @@ def function_packages(domain_ref=None, *, three_layer=False):
             definition["presentation"]["files_field"] = "files"
             definition["presentation"].update(component="markdown", response_mode="content", content_path="markdown")
         if three_layer and domain_ref:
+            # Object authorization is an explicit per-function decision,
+            # never inferred centrally by the router.
+            definition["business_authorization"] = {
+                "mode": "function" if p["key"] in _FUNCTION_AUTHORIZED else "none"
+            }
             bindings, roles = {}, {"target": p["entity"]}
             optional_roles = set()
             for field, typ in {"customer_id": "Customer", "product_id": "Product", "todo_id": "Todo"}.items():
@@ -184,7 +199,7 @@ def function_packages(domain_ref=None, *, three_layer=False):
             definition["participant_roles"] = [{"role": role, "type": "zhiyu:" + typ, "required": role not in optional_roles,
                 "min_count": 0 if role in optional_roles else 1, "max_count": 1} for role, typ in roles.items()]
             definition["trusted_preconditions"] = {"all": [{"fact": "identity.authenticated", "operator": "eq", "value": True},
-                *[{"fact": "entity." + b["role"] + ".authorized", "operator": "eq", "value": True}
+                *[{"fact": "entity." + b["role"] + ".bound", "operator": "eq", "value": True}
                   for field, b in bindings.items() if field in p["required"]]]}
             definition["parameter_semantics"] = {field: {"kind": "date", "unit": None, "allow_relative": True}
                 for field in p["inputs"] if field == "due_on"}

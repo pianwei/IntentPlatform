@@ -79,7 +79,7 @@ def dependency_error(snapshot, db=None):
                 if not row or row.disabled or not version or version.profile_id != row.id or version.workspace_id != snapshot.get("workspace_id"):
                     return "Pinned model profile is unavailable"
     if snapshot.get("dependency_profile") == "platform-v5":
-        if snapshot.get("three_layer_prompt_revision", "scope-v1") not in {"scope-v1", "scope-v2", "scope-v3", "scope-v4", "scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10"}:
+        if snapshot.get("three_layer_prompt_revision", "scope-v1") not in {"scope-v1", "scope-v2", "scope-v3", "scope-v4", "scope-v5", "scope-v6", "scope-v7", "scope-v8", "scope-v9", "scope-v10", "scope-v11"}:
             return "Pinned three-layer prompt revision is unavailable"
         if snapshot.get("agent_projection", {}).get("version") != "agent-projection-v1":
             return "Pinned three-layer projection is unavailable"

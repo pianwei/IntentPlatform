@@ -39,6 +39,27 @@ def assert_synthetic_snapshot(snapshot):
             try:
                 factory = document_composite_definition if is_zhiyu and skill["definition"].get("mode") == "document" else composite_definition
                 accepted = [Definition.model_validate(factory(skill["definition"], skill["version_id"], deps, ref)).model_dump()]
+                if is_zhiyu and skill["definition"].get("mode") == "document":
+                    # The reviewed document upgrade changes the planner
+                    # authority, not the legacy source-catalog presentation.
+                    # Accept the two source-generated display contracts and
+                    # either supported authoring marker; custom variants still
+                    # fail the public-model allowlist.
+                    from .zhiyu.skills import business_skill_templates as zhiyu_templates
+                    from .zhiyu.skills import composite_definition as template_composite
+                    template = next(item for item in zhiyu_templates() if item["key"] == skill["definition"]["key"])
+                    legacy_presentation = Definition.model_validate(template_composite(
+                        template, skill["version_id"], deps, ref)).model_dump()["presentation"]
+                    base = accepted[0]
+                    variants = []
+                    for presentation in (base["presentation"], legacy_presentation):
+                        for authoring_version in ("legacy", "function-v2"):
+                            candidate = deepcopy(base)
+                            candidate["presentation"] = deepcopy(presentation)
+                            candidate["authoring_version"] = authoring_version
+                            if candidate not in variants:
+                                variants.append(candidate)
+                    accepted = variants
             except (KeyError, ValueError):
                 raise ValueError("Unreviewed public composite") from None
         else:
@@ -66,11 +87,27 @@ def assert_synthetic_snapshot(snapshot):
                 except ValueError:
                     continue
             accepted.extend(legacy)
-        # Server-approved result examples are not model input. Public cards never
-        # receive them; no other author-owned text is exempted from this gate.
+        # Result examples, renderer configuration and the editor-only authoring
+        # marker are not model authority. Public planning receives neither the
+        # examples nor presentation fields; keep execution, schema, policy,
+        # connector and descriptive fields under the strict catalog allowlist.
         compared["output_examples"] = []
-        if key in seen or compared not in accepted:
-            raise ValueError("Public model testing requires unchanged approved synthetic definitions")
+        compared.pop("presentation", None)
+        compared.pop("authoring_version", None)
+        normalized_accepted = []
+        for value in accepted:
+            candidate = deepcopy(value)
+            candidate["output_examples"] = []
+            candidate.pop("presentation", None)
+            candidate.pop("authoring_version", None)
+            normalized_accepted.append(candidate)
+        if key in seen or compared not in normalized_accepted:
+            nearest = min(normalized_accepted, key=lambda value: sum(value.get(field) != compared.get(field)
+                          for field in set(value) | set(compared)))
+            changed = ",".join(sorted(field for field in set(nearest) | set(compared)
+                                  if nearest.get(field) != compared.get(field)))
+            raise ValueError("Public model testing requires unchanged approved synthetic definitions:"
+                             + str(key) + "|" + changed)
         seen.add(key)
     for domain in snapshot.get("domain_packages", []):
         # DomainDefinition fills optional fields; compare normalized authority.

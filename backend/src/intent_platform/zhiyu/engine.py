@@ -106,9 +106,7 @@ def authorized_customers(persona_id, state):
             if profile["role"] == "supervisor" or row["manager_id"] == profile["manager_id"]}
 
 def authorize_operation(key, args, state, persona_id):
-    profile = persona(persona_id)
-    if state.get("catalog_id") != CATALOG_ID or state.get("catalog_version") != CATALOG_VERSION:
-        raise PermissionError("Synthetic catalog version is unavailable")
+    profile = authorize_function_role(key, args, state, persona_id)
     allowed = authorized_customers(persona_id, state)
     owners = [args["customer_id"]] if args.get("customer_id") else []
     for field, collection in (("todo_id", "todos"), ("task_id", "marketing_tasks"), ("visit_id", "visits"), ("postloan_id", "postloan_tasks")):
@@ -117,11 +115,26 @@ def authorize_operation(key, args, state, persona_id):
             owners.append(row["customer_id"])
     if any(owner not in allowed for owner in owners):
         raise PermissionError("Synthetic object authorization denied")
+    return allowed
+
+def _check_catalog_state(state):
+    if state.get("catalog_id") != CATALOG_ID or state.get("catalog_version") != CATALOG_VERSION:
+        raise PermissionError("Synthetic catalog version is unavailable")
+
+def authorize_function_role(key, args, state, persona_id):
+    """Apply function-specific role gates without a platform object ACL."""
+    profile = persona(persona_id)
+    _check_catalog_state(state)
     if key == "zhiyu.performance.ranking" and profile["role"] != "supervisor":
         raise PermissionError("Synthetic supervisor role is required")
     if key == "zhiyu.performance.summary" and profile["role"] != "manager":
         raise PermissionError("Use the authorized supervisor ranking capability")
-    return allowed
+    return profile
+
+def _business_authorization_mode(value):
+    if value not in {"function", "none"}:
+        raise ValueError("An explicit function authorization mode is required")
+    return value
 
 def _money(cents):
     return float(Decimal(cents) / 100)
@@ -206,8 +219,10 @@ def _registered_filter(value, registered, suffix):
         return value[:-len(suffix)]
     return value
 
-def _read(key, args, state, persona_id):
-    allowed = authorized_customers(persona_id, state)
+def _read(key, args, state, persona_id, authorization_mode="function"):
+    authorization_mode = _business_authorization_mode(authorization_mode)
+    allowed = (authorized_customers(persona_id, state) if authorization_mode == "function"
+               else set(state["customers"]))
     if key == "zhiyu.customer.search":
         query, tag, city = (args.get(k, "").strip().casefold() for k in ("query", "tag", "city"))
         tag = _registered_filter(tag, {t for row in state["customers"].values() for t in row["tags"]}, "客户")
@@ -318,7 +333,13 @@ def _write(key, args, state):
     except ValueError:
         raise BusinessFailure("INVALID_DATE") from None
     customer = _required(state, "customers", args["customer_id"])
-    identifier = "ZY-MT" + str(max([int(k[5:]) for k in state["marketing_tasks"]] or [0]) + 1).zfill(3)
+    # Hybrid evaluation preserves source task identifiers under a namespace
+    # such as ``SWB-ZY-MT001-L01``. Only canonical simulator IDs participate
+    # in the local sequence; source IDs must remain untouched and must not
+    # make a confirmed simulator write UNKNOWN while parsing a numeric suffix.
+    numbers = [int(key[5:]) for key in state["marketing_tasks"]
+               if key.startswith("ZY-MT") and key[5:].isascii() and key[5:].isdigit()]
+    identifier = "ZY-MT" + str(max(numbers, default=0) + 1).zfill(3)
     row = {"task_id": identifier, **args, "owner_name": state["managers"][customer["manager_id"]]["name"], "status": "PENDING"}
     state["marketing_tasks"][identifier] = row
     return deepcopy(row)
@@ -330,17 +351,21 @@ def _envelope(status, operation_id, data=None, error_code=None):
         result["error_code"] = error_code
     return result
 
-def execute(operation_key, arguments, state, operation_id, fault=None, *, persona_id):
+def execute(operation_key, arguments, state, operation_id, fault=None, *, persona_id, authorization_mode="function"):
     """Execute after caller's confirmation gate. A write never mutates input state."""
     if not isinstance(arguments, dict) or not isinstance(state, dict) or not operation_id:
         raise ValueError("Valid arguments, state and operation ID required")
     persona(persona_id)
+    authorization_mode = _business_authorization_mode(authorization_mode)
     definition = _DEFINITIONS.get(operation_key)
     if not definition:
         return _envelope("FAILED", operation_id, error_code="UNKNOWN_OPERATION"), state
     if input_errors(definition["input_schema"], arguments):
         return _envelope("FAILED", operation_id, error_code="INVALID_ARGUMENTS"), state
-    authorize_operation(operation_key, arguments, state, persona_id)
+    if authorization_mode == "function":
+        authorize_operation(operation_key, arguments, state, persona_id)
+    else:
+        authorize_function_role(operation_key, arguments, state, persona_id)
     if fault not in {None, "definite_failure", "timeout_before_commit", "unknown_after_commit"}:
         raise ValueError("Unknown synthetic test fault")
     write = definition["effect"] == "WRITE"
@@ -354,7 +379,7 @@ def execute(operation_key, arguments, state, operation_id, fault=None, *, person
                          error_code="SIMULATED_FAILURE" if fault == "definite_failure" else "SIMULATED_TIMEOUT"), state
     changed = deepcopy(state) if write else state
     try:
-        data = _write(operation_key, arguments, changed) if write else _read(operation_key, arguments, state, persona_id)
+        data = _write(operation_key, arguments, changed) if write else _read(operation_key, arguments, state, persona_id, authorization_mode)
     except BusinessFailure as exc:
         return _envelope("FAILED", operation_id, error_code=exc.code), state
     if write:
@@ -364,19 +389,26 @@ def execute(operation_key, arguments, state, operation_id, fault=None, *, person
         return _envelope("UNKNOWN", operation_id, error_code="SIMULATED_RESPONSE_LOSS"), changed
     return _envelope("SUCCEEDED", operation_id, data), changed
 
-def reconcile(operation_id, state, *, persona_id):
+def reconcile(operation_id, state, *, persona_id, authorization_mode="function"):
     persona(persona_id)
+    authorization_mode = _business_authorization_mode(authorization_mode)
     record = state.get("_operations", {}).get(operation_id)
     if not record:
         return _envelope("UNKNOWN", operation_id, error_code="OPERATION_NOT_COMMITTED")
     if record["persona_id"] != persona_id:
         raise PermissionError("Synthetic operation belongs to another persona")
-    authorize_operation(record["operation_key"], record["arguments"], state, persona_id)
+    if authorization_mode == "function":
+        authorize_operation(record["operation_key"], record["arguments"], state, persona_id)
+    else:
+        authorize_function_role(record["operation_key"], record["arguments"], state, persona_id)
     return _envelope("SUCCEEDED", operation_id, deepcopy(record["data"]))
 
-def resolve(entity_type, state, persona_id, query, selected_id=None):
-    """Resolve only approved synthetic objects, with distinguishable labels."""
+def resolve(entity_type, state, persona_id, query, selected_id=None, *, authorization_mode=None):
+    """Resolve approved mock objects; object ACL is optional and function-owned."""
     persona(persona_id)
+    if authorization_mode not in {None, "function", "none"}:
+        raise ValueError("Pinned function authorization mode is unavailable")
+    _check_catalog_state(state)
     collections = {"Customer": ("customers", "customer_id"), "Product": ("products", "product_id"),
         "Todo": ("todos", "todo_id"), "Segment": ("segments", "segment_id"), "MarketingTask": ("marketing_tasks", "task_id"),
         "Visit": ("visits", "visit_id"), "PostLoan": ("postloan_tasks", "postloan_id"), "Contact": ("contacts", "contact_id")}
@@ -384,7 +416,10 @@ def resolve(entity_type, state, persona_id, query, selected_id=None):
     if typ not in collections or not entity_type.startswith("zhiyu:"):
         return []
     collection, field = collections[typ]
-    allowed = authorized_customers(persona_id, state)
+    # ``None`` means legacy and keeps the old manager-object boundary. Any
+    # explicit new policy binds first; object decisions happen in the function.
+    allowed = (authorized_customers(persona_id, state) if authorization_mode is None
+               else set(state["customers"]))
     output = []
     for row in state[collection].values():
         if row.get("customer_id") and row["customer_id"] not in allowed:

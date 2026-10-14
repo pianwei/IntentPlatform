@@ -27,13 +27,15 @@ def test_marketing_filter_optional_through_plan_binding_and_worker(client, local
     prepare_run(work)
     drain()
     response = client.get(f"/api/v2/runtime/runs/{rid}", headers=headers)
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     with Session(engine) as db:
         set_identity(db, guest["user_id"])
         calls = db.scalars(select(Call).where(Call.run_id == rid)).all()
         if customer_id == "ZY-C002":
             assert response.json()["status"] == "FAILED"
-            assert calls == []
+            assert len(calls) == 1
+            assert calls[0].status in {"FAILED", "DENIED"}
+            assert calls[0].result["data"] == {}
         else:
             assert response.json()["status"] == "SUCCEEDED", response.text
             assert len(calls) == 1 and calls[0].status == "SUCCEEDED"

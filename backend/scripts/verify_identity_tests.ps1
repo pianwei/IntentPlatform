@@ -24,7 +24,10 @@ try {
     $created = $true
     $ready = $false
     for ($attempt=0; $attempt -lt 40; $attempt++) {
-        & docker --config $dockerConfig exec $testContainer pg_isready -U intent_test_admin -d $testDatabase *> $null
+        # pg_isready can return success during the entrypoint's temporary
+        # bootstrap server, before the requested POSTGRES_DB exists. Confirm
+        # a real query against the target database before creating roles.
+        & docker --config $dockerConfig exec $testContainer psql -h 127.0.0.1 -U intent_test_admin -d $testDatabase -tAc 'SELECT 1' *> $null
         if ($LASTEXITCODE -eq 0) { $ready=$true; break }
         Start-Sleep -Milliseconds 500
     }

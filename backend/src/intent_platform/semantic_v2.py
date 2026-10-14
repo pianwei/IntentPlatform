@@ -35,7 +35,7 @@ def check_expression(expression, depth=0, budget=None):
     elif set(expression) == {"not"}:
         check_expression(expression["not"], depth + 1, budget)
     elif set(expression) <= {"fact", "operator", "value"} and {"fact", "operator"} <= set(expression):
-        if not re.fullmatch(r"identity\.authenticated|(?:entity|history)\.[a-z][a-z0-9_]{0,63}\.authorized", expression["fact"]):
+        if not re.fullmatch(r"identity\.authenticated|(?:entity|history)\.[a-z][a-z0-9_]{0,63}\.(?:authorized|bound)", expression["fact"]):
             raise ValueError("Trusted conditions may only use registered server facts")
         if expression["operator"] not in {"eq", "ne", "exists"} or (expression["operator"] != "exists" and type(expression.get("value")) is not bool):
             raise ValueError("Trusted conditions compare explicit booleans")

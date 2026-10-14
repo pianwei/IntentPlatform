@@ -35,6 +35,38 @@ class Connector(StrictModel):
     http_failure_statuses: list[Literal[400, 404, 409, 422]] = Field(default_factory=list)
 
 
+class BusinessAuthorization(StrictModel):
+    """Per-function ownership of business-object access decisions.
+
+    ``None`` on Definition is reserved for immutable legacy releases, which
+    retain the historical platform object-authorization path. New drafts are
+    normalized to an explicit mode before they can be tested or published.
+    """
+    mode: Literal["function", "none"] = "function"
+    user_id_header: str | None = None
+    workspace_id_header: str | None = None
+
+    @model_validator(mode="after")
+    def trusted_identity_headers(self):
+        import re
+        reserved = {"authorization", "proxy-authorization", "host", "cookie", "set-cookie",
+                    "content-length", "transfer-encoding", "connection", "upgrade",
+                    "te", "trailer", "keep-alive", "proxy-connection"}
+        seen = set()
+        for name in (self.user_id_header, self.workspace_id_header):
+            if name is None:
+                continue
+            if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}", name):
+                raise ValueError("Trusted identity header must be a valid HTTP field name")
+            folded = name.casefold()
+            if folded in reserved or folded in seen:
+                raise ValueError("Trusted identity header conflicts with a protected or duplicate header")
+            seen.add(folded)
+        if self.mode == "none" and seen:
+            raise ValueError("Identity headers can only be configured when authorization is delegated to the function")
+        return self
+
+
 class Condition(StrictModel):
     field: str
     operator: Literal["eq", "ne", "in", "exists"]
@@ -65,6 +97,7 @@ class Definition(StrictModel):
     output_schema: dict | None = None
     output_mode: Literal["fields", "none"] = "fields"
     connector: Connector = Field(default_factory=Connector)
+    business_authorization: BusinessAuthorization | None = None
     effect: Literal["READ_ONLY", "WRITE"] = "READ_ONLY"
     requires_confirmation: bool = False
     allowed_users: list[str] = Field(default_factory=list)
@@ -142,6 +175,19 @@ class Definition(StrictModel):
             raise ValueError("Direct function cannot contain a composite rule")
         if self.effect == "WRITE":
             self.requires_confirmation = True
+        if self.business_authorization is not None:
+            identity_headers = {value.casefold() for value in (
+                self.business_authorization.user_id_header,
+                self.business_authorization.workspace_id_header,
+            ) if value}
+            connector_headers = {value.casefold() for value in (
+                self.connector.authorization_header,
+                self.connector.idempotency_header,
+            ) if value}
+            mapping = self.connector.http_mapping or {}
+            connector_headers.update(str(name).casefold() for name in (mapping.get("headers") or {}))
+            if identity_headers & connector_headers:
+                raise ValueError("Trusted identity headers cannot be overridden by connector mappings or credentials")
         if self.output_mode == "none":
             from .output_contract import check_output_contract
             check_output_contract(self.model_dump())

@@ -109,12 +109,19 @@ def check_pinned_profiles(profiles, workspace_id):
         return False
 
 
-def resolve(reference, pinned, workspace_id, user_id, query, selected_id=None, *, persona_id=None):
+def resolve(reference, pinned, workspace_id, user_id, query, selected_id=None, *, persona_id=None,
+            authorization_mode=None):
+    # Missing mode is an immutable legacy publication and retains the old
+    # object ACL. Explicit function/none modes leave business authorization to
+    # the selected function, never to this platform resolver.
+    if authorization_mode not in {None, "function", "none"}:
+        raise ValueError("Pinned function authorization mode is unavailable")
     current = resolver_profile(reference, workspace_id)
     if current != pinned:
         raise ValueError("Pinned resolver configuration is unavailable")
     if current.get("kind") == "demo":
-        return _resolve_demo(current["entity_type"], workspace_id, user_id, query, selected_id)
+        return _resolve_demo(current["entity_type"], workspace_id, user_id, query, selected_id,
+                             authorization_mode=authorization_mode)
     if current.get("kind") == "zhiyu":
         from sqlalchemy.orm import Session
         from .db import engine, set_identity
@@ -126,7 +133,8 @@ def resolve(reference, pinned, workspace_id, user_id, query, selected_id=None, *
             state = db.get(SyntheticState, (workspace_id, CATALOG_ID))
             if not state or persona_id is None:
                 raise ResolverUnavailable("Synthetic session or catalog is unavailable")
-            return resolve_synthetic(current["entity_type"], state.state, persona_id, query, selected_id)
+            return resolve_synthetic(current["entity_type"], state.state, persona_id, query, selected_id,
+                                     authorization_mode=authorization_mode)
     connector = connector_for(current)
     secret = credential(connector["credential_ref"], workspace_id, connector)
     budget = _budget.get()
@@ -153,19 +161,19 @@ def resolve(reference, pinned, workspace_id, user_id, query, selected_id=None, *
             candidate = Candidate.model_validate(item)
         except ValueError as exc:
             raise ResolverUnavailable("Resolver candidate does not match the finite protocol") from exc
-        if not candidate.authorized:
+        if authorization_mode is None and not candidate.authorized:
             continue
         if candidate.label in labels:
-            raise ResolverUnavailable("Resolver must provide distinguishable masked candidate labels")
+            raise ResolverUnavailable("Resolver must provide distinguishable candidate labels")
         if candidate.type != current["entity_type"] or candidate.id in seen:
-            raise ResolverUnavailable("Resolver returned conflicting or incompatible authorized entities")
+            raise ResolverUnavailable("Resolver returned conflicting or incompatible entities")
         seen.add(candidate.id); labels.add(candidate.label); candidates.append(candidate.model_dump())
     if selected_id:
         candidates = [x for x in candidates if x["id"] == selected_id]
     return candidates
 
 
-def _resolve_demo(entity_type, workspace_id, user_id, query, selected_id):
+def _resolve_demo(entity_type, workspace_id, user_id, query, selected_id, *, authorization_mode=None):
     from sqlalchemy.orm import Session
     from .db import engine, set_identity
     from .models import DemoState
@@ -187,10 +195,11 @@ def _resolve_demo(entity_type, workspace_id, user_id, query, selected_id):
             if selected_id and identifier != selected_id: continue
             label = " · ".join(str(row[x]) for x in ("name", "label", "city", key) if row.get(x))
             if not selected_id and str(query).lower() not in label.lower(): continue
-            try:
-                authorize_operation("demo.entity", {key: identifier}, state, user_id)
-                if row.get("customer_id") and row["customer_id"] not in authorized_customers(user_id, state): continue
-            except PermissionError:
-                continue
+            if authorization_mode is None:
+                try:
+                    authorize_operation("demo.entity", {key: identifier}, state, user_id)
+                    if row.get("customer_id") and row["customer_id"] not in authorized_customers(user_id, state): continue
+                except PermissionError:
+                    continue
             result.append({"id": identifier, "label": label, "type": entity_type, "authorized": True})
         return result[:20]
